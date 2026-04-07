@@ -4,6 +4,8 @@ description: |
   Save and resume working state across sessions. Captures git state, conversation
   context, current Linear ticket, and remaining work.
   Use when: "checkpoint", "save progress", "where was I", "resume".
+model: sonnet
+effort: low
 allowed-tools:
   - Bash
   - Read

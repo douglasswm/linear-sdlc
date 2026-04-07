@@ -4,6 +4,8 @@ description: |
   Convert a spec file into Linear issues with parent/child relationships and
   dependencies. Use when: "create tickets", "make issues", "spec to tickets",
   "break this down into tickets".
+model: sonnet
+effort: medium
 allowed-tools:
   - Bash
   - Read

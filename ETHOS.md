@@ -20,6 +20,10 @@ The human decides. Skills recommend, present options, and provide evidence — b
 
 Do the whole thing. Don't skip the review step because it's "just a small change." Don't skip logging because "we'll remember." The cost of incomplete work compounds; the cost of thorough work is paid once.
 
+## Right Model for the Job
+
+Not every task needs the most powerful model. Skills declare which Claude model and effort level they need. Creative and complex work (brainstorming, implementation) gets Opus with high effort. Mechanical tasks (ticket creation, health checks) get Sonnet. Simple lookups (next ticket) get Haiku. This saves cost and latency without sacrificing quality where it matters.
+
 ## Simplicity
 
 No build steps. No compilation. No complex toolchains. Bash scripts and markdown files. If a feature requires more infrastructure than `node -e`, question whether it's needed in V1.

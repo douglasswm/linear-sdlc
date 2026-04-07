@@ -4,6 +4,8 @@ description: |
   Plan new features. Search Linear for duplicates, discuss breakdown with the user,
   and write a spec file. Use when: "brainstorm", "plan a feature", "new feature idea",
   "explore an idea".
+model: opus
+effort: high
 allowed-tools:
   - Bash
   - Read

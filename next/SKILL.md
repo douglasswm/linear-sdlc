@@ -4,6 +4,8 @@ description: |
   Propose the next ticket to work on. Queries Linear for unblocked, unstarted
   tickets assigned to you, ranks by priority, and presents top 3 options.
   Use when: "what should I work on", "next ticket", "pick a task", "what's next".
+model: haiku
+effort: low
 allowed-tools:
   - Bash
   - Read

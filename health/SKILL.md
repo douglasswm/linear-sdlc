@@ -4,6 +4,8 @@ description: |
   Code quality dashboard. Detects project tools (lint, typecheck, test),
   runs each, computes a weighted composite score 0-10, and tracks trends.
   Use when: "health", "code quality", "run checks", "how healthy".
+model: sonnet
+effort: medium
 allowed-tools:
   - Bash
   - Read

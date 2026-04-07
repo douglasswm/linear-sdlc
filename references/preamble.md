@@ -4,6 +4,21 @@ Every skill runs this bash block first. It detects the project context, loads le
 
 Copy this block into each SKILL.md after the YAML frontmatter.
 
+## Frontmatter
+
+Each SKILL.md must include `model` and `effort` fields in its YAML frontmatter to control which Claude model runs the skill and how much reasoning depth to apply.
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `model` | `opus`, `sonnet`, `haiku`, `opus[1m]`, `sonnet[1m]` | Which Claude model runs this skill |
+| `effort` | `low`, `medium`, `high`, `max` (Opus only) | Reasoning depth — higher = slower but more thorough |
+
+Current assignments:
+- **Opus + high**: `/brainstorm`, `/implement` — deep reasoning, creative/complex work
+- **Sonnet + medium**: root skill, `/create-tickets`, `/health` — structured, mechanical tasks
+- **Sonnet + low**: `/checkpoint` — simple state gathering
+- **Haiku + low**: `/next` — fast query and present
+
 ```bash
 # Detect project
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
