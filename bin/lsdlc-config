@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# lsdlc-config — read/write ~/.linear-sdlc/config.json
+#
+# Usage:
+#   lsdlc-config get <key>          — read a config value
+#   lsdlc-config set <key> <value>  — write a config value
+#   lsdlc-config list               — show all config
+#
+# Env overrides (for testing):
+#   LSDLC_STATE_DIR  — override ~/.linear-sdlc state directory
+set -euo pipefail
+
+STATE_DIR="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+CONFIG_FILE="$STATE_DIR/config.json"
+
+case "${1:-}" in
+  get)
+    KEY="${2:?Usage: lsdlc-config get <key>}"
+    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+$'; then
+      echo "Error: key must contain only alphanumeric characters and underscores" >&2
+      exit 1
+    fi
+    [ -f "$CONFIG_FILE" ] || exit 0
+    node -e "
+      const c = JSON.parse(require('fs').readFileSync('$CONFIG_FILE', 'utf8'));
+      const v = c[process.argv[1]];
+      if (v !== undefined && v !== null) console.log(v);
+    " "$KEY" 2>/dev/null || true
+    ;;
+  set)
+    KEY="${2:?Usage: lsdlc-config set <key> <value>}"
+    VALUE="${3:?Usage: lsdlc-config set <key> <value>}"
+    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+$'; then
+      echo "Error: key must contain only alphanumeric characters and underscores" >&2
+      exit 1
+    fi
+    mkdir -p "$STATE_DIR"
+    node -e "
+      const fs = require('fs');
+      const file = '$CONFIG_FILE';
+      let c = {};
+      try { c = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+      c[process.argv[1]] = process.argv[2];
+      fs.writeFileSync(file, JSON.stringify(c, null, 2) + '\n');
+    " "$KEY" "$VALUE"
+    ;;
+  list)
+    if [ -f "$CONFIG_FILE" ]; then
+      cat "$CONFIG_FILE"
+    else
+      echo "{}"
+    fi
+    ;;
+  *)
+    echo "Usage: lsdlc-config {get|set|list} [key] [value]"
+    exit 1
+    ;;
+esac

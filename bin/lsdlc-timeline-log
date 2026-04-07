@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# lsdlc-timeline-log — append a timeline event to the project timeline
+# Usage: lsdlc-timeline-log '{"skill":"implement","event":"started","branch":"feat-ver-42"}'
+#
+# Session timeline: local-only, never sent anywhere.
+# Required fields: skill, event (started|completed).
+# Optional: branch, outcome, duration_s, session, ts.
+# Validation failure → skip silently (non-blocking).
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+eval "$("$SCRIPT_DIR/lsdlc-slug" 2>/dev/null)"
+LSDLC_HOME="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+mkdir -p "$LSDLC_HOME/projects/$SLUG"
+
+INPUT="$1"
+
+# Validate: input must be parseable JSON with required fields
+if ! printf '%s' "$INPUT" | node -e "
+  let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
+    const j = JSON.parse(d);
+    if (!j.skill || !j.event) process.exit(1);
+  });
+" 2>/dev/null; then
+  exit 0  # skip silently, non-blocking
+fi
+
+# Inject timestamp if not present
+RESULT=$(printf '%s' "$INPUT" | node -e "
+  let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
+    const j = JSON.parse(d);
+    if (!j.ts) j.ts = new Date().toISOString();
+    console.log(JSON.stringify(j));
+  });
+" 2>/dev/null) || true
+
+[ -n "$RESULT" ] && echo "$RESULT" >> "$LSDLC_HOME/projects/$SLUG/timeline.jsonl"

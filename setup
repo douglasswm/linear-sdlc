@@ -1,0 +1,106 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_INSTALL_DIR="$HOME/.claude/skills"
+
+echo ""
+echo "linear-sdlc — SDLC workflow for Linear + Claude Code"
+echo "====================================================="
+echo ""
+
+# 1. Check dependencies
+echo "Checking dependencies..."
+command -v node >/dev/null || { echo "Error: node is required (brew install node)"; exit 1; }
+command -v gh >/dev/null || { echo "Error: gh CLI is required (brew install gh)"; exit 1; }
+command -v git >/dev/null || { echo "Error: git is required"; exit 1; }
+echo "  node $(node --version)"
+echo "  gh $(gh --version | head -1)"
+echo "  git $(git --version)"
+echo ""
+
+# 2. Get Linear API key
+if [ -z "${LINEAR_API_KEY:-}" ]; then
+  echo "Enter your Linear API key (from Linear Settings → API → Personal API keys):"
+  read -r LINEAR_API_KEY
+  echo ""
+fi
+
+if [ -z "$LINEAR_API_KEY" ]; then
+  echo "Error: LINEAR_API_KEY is required"
+  exit 1
+fi
+
+# 3. Configure MCP server in ~/.claude/settings.json
+SETTINGS="$HOME/.claude/settings.json"
+mkdir -p "$(dirname "$SETTINGS")"
+
+echo "Configuring Linear MCP server..."
+if [ -f "$SETTINGS" ]; then
+  # Merge mcpServers.linear into existing settings
+  node -e "
+    const fs = require('fs');
+    const s = JSON.parse(fs.readFileSync('$SETTINGS', 'utf8'));
+    s.mcpServers = s.mcpServers || {};
+    s.mcpServers.linear = {
+      type: 'npm',
+      package: '@anthropic-ai/linear-mcp-server',
+      env: { LINEAR_API_KEY: '$LINEAR_API_KEY' }
+    };
+    fs.writeFileSync('$SETTINGS', JSON.stringify(s, null, 2) + '\n');
+  "
+else
+  cat > "$SETTINGS" << EOF
+{
+  "mcpServers": {
+    "linear": {
+      "type": "npm",
+      "package": "@anthropic-ai/linear-mcp-server",
+      "env": {
+        "LINEAR_API_KEY": "$LINEAR_API_KEY"
+      }
+    }
+  }
+}
+EOF
+fi
+echo "  MCP server configured in $SETTINGS"
+
+# 4. Create state directory
+mkdir -p "$HOME/.linear-sdlc/projects"
+echo "  State directory created at ~/.linear-sdlc/"
+
+# 5. Register skills (create symlinks)
+echo ""
+echo "Registering skills..."
+mkdir -p "$SKILL_INSTALL_DIR"
+
+# Symlink the root linear-sdlc directory
+ln -snf "$SCRIPT_DIR" "$SKILL_INSTALL_DIR/linear-sdlc"
+echo "  linked: linear-sdlc (root)"
+
+# Symlink each skill subdirectory that contains a SKILL.md
+for skill_dir in "$SCRIPT_DIR"/*/; do
+  skill_name=$(basename "$skill_dir")
+  if [ -f "$skill_dir/SKILL.md" ]; then
+    ln -snf "$skill_dir" "$SKILL_INSTALL_DIR/$skill_name"
+    echo "  linked: $skill_name"
+  fi
+done
+
+# 6. Print success
+echo ""
+echo "========================================"
+echo "  linear-sdlc installed successfully"
+echo "========================================"
+echo ""
+echo "Available skills:"
+echo "  /brainstorm      — Plan new features, write specs"
+echo "  /create-tickets  — Create Linear issues from specs"
+echo "  /next            — Propose next ticket to work on"
+echo "  /implement       — Full implementation lifecycle"
+echo "  /checkpoint      — Save/resume session state"
+echo "  /health          — Code quality dashboard"
+echo ""
+echo "Linear MCP server configured. Restart Claude Code to activate."
+echo ""

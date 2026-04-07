@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# lsdlc-learnings-log — append a learning to the project learnings file
+# Usage: lsdlc-learnings-log '{"skill":"implement","type":"pitfall","key":"npm-legacy-deps","insight":"...","confidence":8,"source":"observed"}'
+#
+# Append-only storage. Duplicates (same key+type) are resolved at read time
+# by lsdlc-learnings-search ("latest winner" per key+type).
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+eval "$("$SCRIPT_DIR/lsdlc-slug" 2>/dev/null)"
+LSDLC_HOME="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+mkdir -p "$LSDLC_HOME/projects/$SLUG"
+
+INPUT="$1"
+
+# Validate: input must be parseable JSON
+if ! printf '%s' "$INPUT" | node -e "
+  let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => { JSON.parse(d); });
+" 2>/dev/null; then
+  echo "lsdlc-learnings-log: invalid JSON, skipping" >&2
+  exit 1
+fi
+
+# Inject timestamp if not present
+RESULT=$(printf '%s' "$INPUT" | node -e "
+  let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
+    const j = JSON.parse(d);
+    if (!j.ts) j.ts = new Date().toISOString();
+    console.log(JSON.stringify(j));
+  });
+" 2>/dev/null) || true
+
+[ -n "$RESULT" ] && echo "$RESULT" >> "$LSDLC_HOME/projects/$SLUG/learnings.jsonl"

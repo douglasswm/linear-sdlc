@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# lsdlc-wiki-lint — check wiki for stale or inconsistent content
+# Usage: lsdlc-wiki-lint
+#
+# Checks for:
+# - Pages older than 30 days without updates
+# - Pages referenced in index.md that don't exist
+# - Learnings that contradict wiki content (newer learnings with different info)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+eval "$("$SCRIPT_DIR/lsdlc-slug" 2>/dev/null)"
+LSDLC_HOME="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+PROJ="$LSDLC_HOME/projects/$SLUG"
+WIKI="$PROJ/wiki"
+
+if [ ! -d "$WIKI" ]; then
+  echo "No wiki directory found at $WIKI"
+  exit 0
+fi
+
+ISSUES=0
+
+echo "## Wiki Lint Report"
+echo ""
+
+# Check for stale pages (>30 days old)
+echo "### Stale Pages (>30 days since last modified)"
+STALE=$(find "$WIKI" -name "*.md" ! -name "index.md" ! -name "log.md" -mtime +30 2>/dev/null)
+if [ -n "$STALE" ]; then
+  echo "$STALE" | while read -r f; do
+    echo "- $(basename "$f") — last modified $(stat -f '%Sm' -t '%Y-%m-%d' "$f" 2>/dev/null || stat -c '%y' "$f" 2>/dev/null | cut -d' ' -f1)"
+    ISSUES=$((ISSUES + 1))
+  done
+else
+  echo "None found."
+fi
+echo ""
+
+# Check for broken index references
+echo "### Broken Index References"
+if [ -f "$WIKI/index.md" ]; then
+  grep -oE '\([^)]+\.md\)' "$WIKI/index.md" 2>/dev/null | tr -d '()' | while read -r ref; do
+    if [ ! -f "$WIKI/$ref" ]; then
+      echo "- index.md references '$ref' but file does not exist"
+      ISSUES=$((ISSUES + 1))
+    fi
+  done
+  # Check if any output was produced
+  BROKEN=$(grep -oE '\([^)]+\.md\)' "$WIKI/index.md" 2>/dev/null | tr -d '()' | while read -r ref; do
+    [ ! -f "$WIKI/$ref" ] && echo "$ref"
+  done)
+  [ -z "$BROKEN" ] && echo "None found."
+else
+  echo "No index.md found — run lsdlc-wiki-ingest first."
+fi
+echo ""
+
+# Check for wiki pages not in index
+echo "### Orphaned Pages (not in index)"
+for page in "$WIKI"/*.md; do
+  [ ! -f "$page" ] && continue
+  name=$(basename "$page")
+  [ "$name" = "index.md" ] || [ "$name" = "log.md" ] && continue
+  if [ -f "$WIKI/index.md" ] && ! grep -q "$name" "$WIKI/index.md" 2>/dev/null; then
+    echo "- $name exists but is not referenced in index.md"
+    ISSUES=$((ISSUES + 1))
+  fi
+done
+echo ""
+
+# Summary
+echo "### Summary"
+if [ "$ISSUES" -eq 0 ]; then
+  echo "Wiki is clean. No issues found."
+else
+  echo "$ISSUES issue(s) found. Run lsdlc-wiki-ingest to refresh."
+fi
