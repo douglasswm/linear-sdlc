@@ -12,6 +12,7 @@ allowed-tools:
   - Write
   - Glob
   - Grep
+  - Skill
   - AskUserQuestion
 ---
 
@@ -79,7 +80,29 @@ These look related. Want to:
 
 If no duplicates found, proceed.
 
-## Step 3: Guided Discussion
+## Step 3: Assess Complexity
+
+Before diving into discussion, assess whether this feature needs a lightweight brainstorm or a full design process.
+
+**Escalate to `superpowers:brainstorming`** if ANY of these are true:
+- The feature spans multiple independent subsystems (e.g., "build auth + billing + notifications")
+- It requires architecture decisions (new services, data model changes, API design)
+- It would benefit from visual mockups, wireframes, or architecture diagrams
+- The user explicitly asks for a "full design" or "design spec"
+
+If escalating, tell the user:
+```
+This feature is complex enough to benefit from a full design process with architecture review,
+approach trade-offs, and a formal spec. Handing off to the design brainstorming workflow.
+```
+Then invoke the `superpowers:brainstorming` skill. After it produces a design spec, return here and offer to run `/create-tickets` on it.
+
+**Stay in `/brainstorm`** if the feature is:
+- A well-scoped enhancement or addition to existing functionality
+- Clear enough to go straight from discussion to tickets
+- Something the user wants to move quickly on without a formal design phase
+
+## Step 4: Guided Discussion
 
 Walk through these questions with the user. Don't dump them all at once — have a conversation.
 
@@ -92,7 +115,7 @@ Walk through these questions with the user. Don't dump them all at once — have
 
 After each answer, reflect back your understanding and ask the next question. Don't assume — verify.
 
-## Step 4: Write the Spec
+## Step 5: Write the Spec
 
 Create the spec file:
 
@@ -104,7 +127,7 @@ Create the spec file:
 
 Present the spec to the user for review. Ask if they want to adjust anything.
 
-## Step 5: Next Steps
+## Step 6: Next Steps
 
 After the spec is finalized:
 
@@ -119,7 +142,7 @@ After the spec is finalized:
 **Recommendation:** If this is ready to build, create tickets now while the context is fresh.
 ```
 
-## Step 6: Wrap Up
+## Step 7: Wrap Up
 
 ```bash
 ~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"brainstorm","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","spec":"specs/SLUG.md","session":"'"$_SESSION_ID"'"}' 2>/dev/null
