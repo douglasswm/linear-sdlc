@@ -22,46 +22,28 @@ allowed-tools:
 Run this first:
 
 ```bash
-# Resolve repo root from this skill's symlink target (./setup persists this).
+# Bootstrap: resolve LINEAR_SDLC_ROOT from this skill's symlink, then source
+# the shared preamble (safe env loader + project detection + session tracking).
 if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
-  for _candidate in "$HOME/.claude/skills/brainstorm/SKILL.md" \
-                    "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
-    if [ -L "$_candidate" ]; then
-      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_candidate")")/../.." && pwd)"
+  for _c in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_c" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_c")")/../.." && pwd)"
       break
     fi
   done
-  if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
-    LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || echo "")"
-  fi
+  [ -z "${LINEAR_SDLC_ROOT:-}" ] && LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || true)"
   export LINEAR_SDLC_ROOT
 fi
+SKILL_NAME=checkpoint . "$LINEAR_SDLC_ROOT/references/preamble.sh"
 
-# Source LINEAR_API_KEY for lsdlc-linear if it isn't already in the environment.
-if [ -z "${LINEAR_API_KEY:-}" ] && [ -f "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env" ]; then
-  set +u
-  . "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env"
-  set -u
-fi
-
-_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-_PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
-mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
-
-echo "BRANCH: $_BRANCH"
-echo "PROJECT: $_SLUG"
-
-# List existing checkpoints
+# List existing checkpoints (skill-specific display)
 _CP_COUNT=$(find "$_PROJ/checkpoints" -name "*.md" -type f 2>/dev/null | wc -l | tr -d ' ')
-echo "CHECKPOINTS: $_CP_COUNT saved"
-if [ "$_CP_COUNT" -gt 0 ]; then
+echo "CHECKPOINTS: ${_CP_COUNT:-0} saved"
+if [ "${_CP_COUNT:-0}" -gt 0 ]; then
   echo "LATEST:"
   find "$_PROJ/checkpoints" -name "*.md" -type f 2>/dev/null | xargs ls -1t 2>/dev/null | head -3
 fi
-
-_SESSION_ID="$$-$(date +%s)"
-lsdlc-timeline-log '{"skill":"checkpoint","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```

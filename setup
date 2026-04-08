@@ -334,7 +334,10 @@ if [ "$SKIP_API_KEY" -eq 0 ]; then
         # `printf` for the key line keeps it on one line with no shell processing.
         {
           cat <<'HEADER_EOF'
-# linear-sdlc env — sourced by bin/lsdlc-linear and the skill preamble.
+# linear-sdlc env — parsed by bin/lsdlc-linear and the shared preamble.
+# The preamble/lsdlc-linear parse the LINEAR_API_KEY line in pure shell/JS;
+# this file is never `.`-sourced, so arbitrary shell appended below this
+# line will NOT execute. Keep it that way.
 # chmod 600. Never commit. Plain-text storage; see README for alternatives
 # (1Password CLI, direnv, exporting from your shell rc).
 HEADER_EOF
