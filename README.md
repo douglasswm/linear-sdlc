@@ -1,283 +1,309 @@
 # linear-sdlc
 
-A complete SDLC workflow for teams using Linear + Claude Code. Ticket-driven development with specialist code reviews, knowledge accumulation, and quality monitoring.
+A complete SDLC workflow for teams using Linear + Claude Code. Ticket-driven development with specialist code reviews, knowledge accumulation, and quality monitoring — distributed as a skills pack you clone, install, and own.
 
 ## Prerequisites
 
-Before installing, make sure you have:
-
-- **Claude Code** with plugin support
-- **Node.js** — Required for the Linear MCP server (`node --version` to check)
-- **GitHub CLI** — Required for PR creation (`gh --version` to check, install with `brew install gh`)
-- **Git** — Required for branch management
-- **Linear API key** — Go to [Linear Settings → API → Personal API keys](https://linear.app/settings/api) and create one
+- **Claude Code** (the `claude` CLI)
+- **Git**
+- **Node 18+** — required for built-in `fetch` (used by `bin/lsdlc-linear`)
+- **GitHub CLI (`gh`)** — required by `/implement` for PR creation
+- **Linear API key** — create one at [linear.app/settings/api](https://linear.app/settings/api)
 
 ## Installation
 
-linear-sdlc is distributed as a Claude Code plugin.
-
-### Install
-
-In a Claude Code session, run:
-
-```
-/plugin marketplace add git@github.com:douglasswm/linear-sdlc.git
-/plugin install linear-sdlc@linear-sdlc
-/reload-plugins
+```bash
+git clone git@github.com:douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc
+cd ~/.claude/skills/linear-sdlc
+./setup
 ```
 
-The `marketplace.json` and `plugin.json` are both named `linear-sdlc`, so the install target is `linear-sdlc@linear-sdlc` (`<plugin>@<marketplace>`). Claude Code prompts you for your Linear API key on enable; the key is stored in your OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) — never in plaintext config files.
+`./setup` is interactive and idempotent. It:
 
-### Verify
+- Checks prereqs and resolves the repo path
+- Asks whether you want **short** skill names (`/brainstorm`) or **namespaced** ones (`/linear-sdlc-brainstorm`); short is the default and remembered for next time
+- Creates skill symlinks under `~/.claude/skills/` (one per skill, so Claude Code discovers them as top-level commands)
+- Symlinks the helper scripts under `bin/` into `~/.local/bin/` so the skills can call them as bare commands (warns if `~/.local/bin` isn't on your `PATH`)
+- Prompts for your **Linear API key** and writes it to `~/.linear-sdlc/env` (mode `0600`) — see [API key storage](#api-key-storage) below
+- Prompts for your **Linear team key** (e.g., `VER`) and saves it to `~/.linear-sdlc/config.json`
+- Prints how to install the official Linear MCP server **separately** if you want it (we don't install it for you — see [Why we don't embed an MCP server](#why-we-dont-embed-an-mcp-server))
 
-Ask Claude: **"List my Linear teams"**. If the MCP server is working, you'll see your team(s) returned. You can also type `/help` and look for the `linear-sdlc:` skills under "custom-commands".
-
-### Discoverability tip
-
-In current Claude Code releases, typing `/linear-sdlc:` doesn't always pop the autocomplete menu, but the skills are loaded — type the full slash command (e.g., `/linear-sdlc:brainstorm rate limiting`) and it runs. `/help` lists every available skill with its description.
+You can re-run `./setup` any time. Existing values default to "keep". Switch naming with `./setup --prefix` / `./setup --no-prefix`.
 
 ### Updating
 
+```bash
+cd ~/.claude/skills/linear-sdlc
+git pull
+./setup
 ```
-/plugin update linear-sdlc@linear-sdlc
-/reload-plugins
-```
+
+`./setup` re-links symlinks (idempotent) and respects your saved config.
 
 ### Uninstalling
 
+```bash
+# Remove symlinks
+rm -rf ~/.claude/skills/{brainstorm,next,implement,create-tickets,checkpoint,debug,health}
+rm -f  ~/.local/bin/lsdlc-*
+# Remove the checkout
+rm -rf ~/.claude/skills/linear-sdlc
+# Optional: wipe project state (learnings, timelines, checkpoints, wiki)
+rm -rf ~/.linear-sdlc
 ```
-/plugin uninstall linear-sdlc@linear-sdlc
-```
 
-This removes the plugin and the MCP server registration. Your project state (`~/.linear-sdlc/projects/*/`) is preserved — delete it manually if you want a clean slate.
+If you used `--prefix`, replace the skill names above with `linear-sdlc-brainstorm`, `linear-sdlc-next`, etc.
 
-### Local development
+### Migrating from v1 (the plugin era)
 
-If you're hacking on the plugin itself, the fast iteration loop is:
+v1.0.x of linear-sdlc was packaged as a Claude Code plugin. v2 is a clean break — no plugin, no embedded MCP server, no marketplace install. To migrate:
 
-1. **Once:** install via the marketplace flow above so the API key gets written to your OS keychain.
-2. **Then:** quit Claude Code and restart with `--plugin-dir` pointing at your local checkout:
-   ```bash
-   claude --plugin-dir /path/to/linear-sdlc
+1. **Uninstall the v1 plugin** in Claude Code:
    ```
-   The local checkout takes precedence over the installed marketplace copy for that session, but the userConfig (API key) is reused from the keychain — so the Linear MCP server still works without re-prompting.
-3. As you edit skill files, run `/reload-plugins` inside the session to pick up changes without restarting.
+   /plugin uninstall linear-sdlc@linear-sdlc
+   ```
+2. **Manually remove the OS keychain entry** for `linear_api_key`. On macOS, find it in Keychain Access by searching for "linear" or "claude-code"; on Linux, use your distro's secret-service tool; on Windows, Credential Manager. (Claude Code does not currently expose a keychain-cleanup command for plugin secrets.)
+3. **Clone and run `./setup`** as above. Your `~/.linear-sdlc/projects/` state directory survives the migration intact — learnings, timelines, checkpoints, wiki pages, and per-branch review files all carry over.
+
+## Why we don't embed an MCP server
+
+The previous (v1) plugin shipped a reference to `@anthropic-ai/linear-mcp-server` and registered it via plugin `userConfig`. That had a bunch of subtle problems:
+
+- `npx -y` resolution against the user's local Node, with no version pinning
+- `${user_config.linear_api_key}` interpolation that fought with Claude Code's `/doctor` checker
+- Reconnect failures after `/plugin config` (we hit one in this very session)
+- Hardcoded dependency on a single MCP package whose name has shifted over time
+
+The cleaner path is to **delegate to vendor-maintained MCP servers**. Linear themselves publish a first-party HTTP MCP at `https://mcp.linear.app/mcp` with proper OAuth, dynamic client registration, and Linear-managed updates. You install it once with one command:
+
+```bash
+claude mcp add --transport http linear https://mcp.linear.app/mcp
+```
+
+Then run `/mcp` inside a Claude Code session to complete the OAuth flow in your browser. After that, ad-hoc Linear queries ("list my open cycles", "what's blocking VER-42", etc.) work in any Claude Code session.
+
+**linear-sdlc skills do not depend on this.** They use direct Linear GraphQL via the bundled `bin/lsdlc-linear` helper, which reads `LINEAR_API_KEY` from your environment. Install the official MCP if you want richer ad-hoc queries; skip it if you don't. Either way, the skills behave the same.
+
+## The `lsdlc-linear` helper
+
+`bin/lsdlc-linear` is a zero-dependency Node script that wraps Linear's GraphQL API. It reads `LINEAR_API_KEY` from the environment (falling back to `~/.linear-sdlc/env`) and outputs JSON to stdout. The skills call it directly via Bash; nothing in the helper ever puts the API key on the command line or in error output.
+
+| Subcommand | Purpose |
+|---|---|
+| `lsdlc-linear whoami` | Print the authenticated viewer (sanity check for the API key) |
+| `lsdlc-linear search-issues "<query>" [--team KEY] [--limit N]` | Full-text search across the workspace |
+| `lsdlc-linear list-assigned [--team KEY] [--status "Todo,Backlog"] [--limit N]` | Issues assigned to you, filtered by state name |
+| `lsdlc-linear get-issue VER-42` | Full ticket: title, description, parent, children, relations, labels, comments |
+| `lsdlc-linear set-status VER-42 "In Progress"` | Move a ticket between workflow states (resolves the state name on the issue's team) |
+| `lsdlc-linear create-issue --title "..." [--description "..."] [--team KEY] [--priority N] [--labels l1,l2] [--parent VER-40]` | Create an issue, optionally with a parent and labels |
+| `lsdlc-linear add-relation VER-42 blockedBy VER-41` | Add a `blocks` / `blockedBy` relation between two issues |
+
+Try it:
+
+```bash
+lsdlc-linear whoami
+lsdlc-linear list-assigned --team VER --status "Todo,Backlog" --limit 5
+```
+
+Pipe the output through `node -e` for inline parsing, or feed it through `jq` if you have it installed.
+
+## API key storage
+
+`./setup` writes your Linear API key to `~/.linear-sdlc/env` with mode `0600`:
+
+```bash
+# linear-sdlc env — sourced by bin/lsdlc-linear and the skill preamble.
+export LINEAR_API_KEY='lin_api_...'
+```
+
+This is plain-text storage. The threat model is "another user on the same machine reading my files" — `0600` protects against that, but anyone with root can still read it. If that's too loose for you, the helper reads `LINEAR_API_KEY` from any source — pick one of these instead:
+
+**1Password CLI:**
+```bash
+export LINEAR_API_KEY="$(op read 'op://Private/Linear/api-key')"
+```
+
+**direnv** (project-local `.envrc`):
+```bash
+export LINEAR_API_KEY="<your key>"
+```
+
+**Shell rc** (`~/.zshrc` / `~/.bashrc`):
+```bash
+export LINEAR_API_KEY='lin_api_...'
+```
+
+If `LINEAR_API_KEY` is already in the environment when a skill runs, the preamble does NOT source `~/.linear-sdlc/env` — your shell-provided value wins.
+
+Use `./setup --skip-api-key` to opt out of writing the env file entirely.
+
+## State directory
+
+All persistent state lives at `~/.linear-sdlc/`:
+
+```
+~/.linear-sdlc/
+├── env                              # API key (mode 0600), if you used setup's prompt
+├── config.json                      # team ID, prefs (managed by lsdlc-config)
+└── projects/
+    └── {slug}/                      # per-project (slug derived from git remote)
+        ├── learnings.jsonl          # operational notes (append-only, with confidence decay)
+        ├── timeline.jsonl           # skill execution history
+        ├── {branch}-reviews.jsonl   # specialist review findings per branch
+        ├── health-history.jsonl     # /health score trend
+        ├── wiki/                    # synthesized knowledge pages
+        │   ├── index.md
+        │   └── log.md
+        └── checkpoints/             # /checkpoint session state
+```
+
+Override the location with `LSDLC_STATE_DIR=/path/to/state`.
+
+## Bin scripts
+
+| Script | Purpose |
+|---|---|
+| `lsdlc-slug` | Derive project slug + branch from git context |
+| `lsdlc-config` | Read/write `config.json` (`get`, `set`, `list`) |
+| `lsdlc-timeline-log` | Append skill events to `timeline.jsonl` |
+| `lsdlc-learnings-log` | Append operational learnings to `learnings.jsonl` |
+| `lsdlc-learnings-search` | Search learnings with confidence decay and dedup |
+| `lsdlc-wiki-ingest` | Synthesize learnings into wiki pages (3+ per topic) |
+| `lsdlc-wiki-lint` | Check wiki for stale or inconsistent content |
+| `lsdlc-linear` | Direct Linear GraphQL helper (see [above](#the-lsdlc-linear-helper)) |
+
+After `./setup`, all of these are on your `PATH` via `~/.local/bin/`. You can call them from any terminal — they're not Claude-specific.
 
 ## Skills
 
-Each skill is configured with an appropriate Claude model and effort level to balance reasoning depth with speed and cost.
+Each skill is a single `SKILL.md` file with YAML frontmatter declaring its model and effort. `./setup` symlinks each skill into `~/.claude/skills/` so Claude Code discovers it as a top-level command.
 
 | Skill | Description | Model | Effort |
-|-------|-------------|-------|--------|
-| `/linear-sdlc:brainstorm` | Plan new features, search for duplicates, write specs | Opus | Medium |
-| `/linear-sdlc:create-tickets` | Convert spec files into Linear issues with dependencies | Sonnet | Medium |
-| `/linear-sdlc:next` | Query Linear for unblocked tickets, recommend what to work on | Haiku | Low |
-| `/linear-sdlc:implement` | Full lifecycle: ticket → branch → code → specialist review → PR | Sonnet | Medium |
-| `/linear-sdlc:debug` | Systematic bug investigation with component-boundary evidence | Sonnet | Medium |
-| `/linear-sdlc:checkpoint` | Save/resume working state across sessions | Sonnet | Low |
-| `/linear-sdlc:health` | Code quality dashboard with composite scoring | Sonnet | Medium |
+|---|---|---|---|
+| `/brainstorm` | Plan new features, search Linear for duplicates, write specs | Opus | Medium |
+| `/create-tickets` | Convert spec files into Linear issues with dependencies | Sonnet | Medium |
+| `/next` | Query Linear for unblocked tickets, recommend what to work on | Haiku | Low |
+| `/implement` | Full lifecycle: ticket → branch → code → specialist review → PR | Sonnet | Medium |
+| `/debug` | Systematic bug investigation with component-boundary evidence | Sonnet | Medium |
+| `/checkpoint` | Save/resume working state across sessions | Sonnet | Low |
+| `/health` | Code quality dashboard with composite scoring | Sonnet | Medium |
 
-**Why different models?** Defaults are tuned for cost and latency on typical tickets, not worst-case complexity:
+(Names above assume the default `--no-prefix` install. With `--prefix`, they become `/linear-sdlc-brainstorm`, etc.)
 
-- **`/linear-sdlc:brainstorm`** uses **Opus** because feature planning benefits from cross-domain synthesis and catching subtle product nuance. Medium effort is plenty for interactive Q&A — high effort is wasted when the human drives the pace.
-- **`/linear-sdlc:implement`** uses **Sonnet/Medium** because most tickets are small (one or two files, a handful of acceptance criteria). The heavy reasoning during specialist self-review runs in parallel sub-agents that can decide their own depth. For a genuinely architectural ticket, either run `/linear-sdlc:brainstorm` first to front-load the thinking, or manually bump `skills/implement/SKILL.md` to `opus`/`high` for that session.
-- **`/linear-sdlc:debug`** uses **Sonnet/Medium** — diagnostic reasoning needs structure (component-boundary evidence, hypothesis discipline) but not Opus-level creativity. Medium effort leaves room for the soft invariant "observe before hypothesizing".
-- **`/linear-sdlc:create-tickets`** and **`/linear-sdlc:health`** use **Sonnet/Medium** — structured work with enough judgment (dependency inference, scoring) to benefit from medium effort.
-- **`/linear-sdlc:next`** uses **Haiku/Low** — it's a query, a rank, and a presentation. Haiku is faster and sufficient.
-- **`/linear-sdlc:checkpoint`** uses **Sonnet/Low** — mostly mechanical state dump/restore.
+**Why different models?** Defaults are tuned for cost and latency on typical work, not worst case:
 
-If a skill feels underpowered for your work, fork the plugin repo and edit the `model:` and `effort:` lines in that skill's `SKILL.md`.
+- **`/brainstorm`** uses **Opus** because feature planning benefits from cross-domain synthesis. Medium effort is plenty for interactive Q&A.
+- **`/implement`** uses **Sonnet/Medium** because most tickets are small. Heavy reasoning happens in the parallel specialist sub-agents during self-review, and they pick their own depth.
+- **`/debug`** uses **Sonnet/Medium** — diagnostic reasoning needs structure, not raw creativity.
+- **`/create-tickets`** and **`/health`** use **Sonnet/Medium** — structured judgment.
+- **`/next`** uses **Haiku/Low** — query, rank, present.
+- **`/checkpoint`** uses **Sonnet/Low** — mechanical state dump/restore.
+
+If a skill feels underpowered, edit the `model:` and `effort:` lines in `skills/<skill>/SKILL.md` directly — symlinks pick up the change on the next session.
 
 ## Usage
 
 ### Planning a new feature
 
-Start with `/linear-sdlc:brainstorm` to explore the idea, search Linear for existing related tickets, and write a spec file:
-
 ```
-/linear-sdlc:brainstorm rate limiting
+/brainstorm rate limiting
 ```
 
-This walks you through a structured discussion (problem, impact, solution shape, scope, technical approach) and writes a spec to `specs/rate-limiting.md`.
+Walks you through a structured discussion (problem, impact, scope, technical approach) and writes a spec to `specs/rate-limiting.md`. For features that span multiple subsystems, `/brainstorm` automatically switches into an inline **deep-design mode** — codebase grounding, 2-3 approach comparison, section-by-section design walkthrough with per-section approval.
 
-**Deep design mode.** For features that span multiple subsystems, require architecture decisions, or need a formal design process, `/linear-sdlc:brainstorm` automatically switches into an inline **deep-design mode**: it scans the codebase for grounding, proposes 2–3 approaches with a trade-off table, walks through the chosen design section-by-section (data model → API → failure modes → rollout) with per-section approval, and runs a self-review checklist before writing the spec. No external skills or plugins required — it's all inline.
-
-When the spec is ready, convert it to Linear tickets:
+When the spec is ready:
 
 ```
-/linear-sdlc:create-tickets specs/rate-limiting.md
+/create-tickets specs/rate-limiting.md
 ```
 
-This creates a parent issue and sub-issues in Linear with proper dependencies, priorities, and labels. You confirm the breakdown before anything is created. If the spec touches three or more subsystems, `/linear-sdlc:create-tickets` will also ask whether to bundle them under one parent or split into multiple parents for independent release trains.
+Creates a parent issue and sub-issues in Linear with proper blocking relationships, priorities, and labels — all via direct GraphQL through `lsdlc-linear`. You confirm the breakdown before anything is created.
 
 ### Picking what to work on
 
 ```
-/linear-sdlc:next
+/next
 ```
 
-Queries your assigned Linear tickets, filters out blocked ones, and ranks by priority and cycle deadline. Presents the top 3 with a recommendation. When you pick one, it hands off to `/linear-sdlc:implement`.
+Queries your assigned tickets, filters out blocked ones, ranks by priority and cycle deadline, and presents the top 3 with a recommendation.
 
 ### Implementing a ticket
 
 ```
-/linear-sdlc:implement VER-42
+/implement VER-42
 ```
 
-Full lifecycle for a single ticket:
-
-1. **Loads the ticket** from Linear (title, description, parent, spec)
-2. **Pre-flight checks** — verifies the ticket isn't blocked, checks for existing branches, ensures clean working tree
-3. **Sets status** to "In Progress" in Linear
-4. **Creates a branch** (`feat/ver-42-short-description`)
-5. **Plans** the implementation if the ticket is complex (>3 acceptance criteria)
-6. **You code** with Claude's help
-7. **Specialist self-review** — dispatches parallel sub-agents that review the diff:
-   - **Testing specialist** — missing tests, weak assertions, untested paths
-   - **Security specialist** — injection, hardcoded secrets, auth gaps (only when relevant code changed)
-   - **Performance specialist** — N+1 queries, missing indexes, unbounded results (only when backend code changed)
-   - **Code quality specialist** — dead code, DRY violations, naming issues
-8. **Creates a PR** via `gh` with the ticket linked
-9. **Sets status** to "In Review" in Linear
-10. **Logs learnings and timeline** for future sessions
-
-Critical findings from specialists must be fixed before the PR is created. Warnings are presented for your decision.
-
-Before the PR is pushed, `/linear-sdlc:implement` also runs a **completeness check** — a placeholder/TODO scan across the diff and an acceptance-criteria walkthrough — so stray `TODO`s and unfinished criteria get surfaced. The check is advisory, not blocking: you decide whether to fix now, file a follow-up ticket, or accept as-is.
+Full lifecycle: load ticket context → pre-flight checks → set status to "In Progress" → create branch → code with you → run **specialist self-review** in parallel sub-agents (testing / security / performance / code-quality) → create PR via `gh` → set status to "In Review". Critical findings from specialists must be fixed before the PR is created.
 
 ### Debugging a bug
 
 ```
-/linear-sdlc:debug
+/debug
 ```
 
-Systematic bug investigation. The skill walks you through reproduce → identify component boundaries → instrument at each boundary → observe → hypothesize root cause → propose minimal fix. The core idea is **evidence before hypothesis**: gather data at the boundaries between components so you can pinpoint where wrong data first appears, rather than guessing from the crash site.
+Reproduce → identify component boundaries → instrument → observe → hypothesize root cause → propose minimal fix. Evidence before hypothesis. Soft discipline — User Sovereignty still applies.
 
-This is a soft discipline, not an iron law — if the root cause is obvious, the user can skip ahead. A learning is logged automatically when an investigation surfaces something non-obvious about the project.
-
-### Saving and resuming work
-
-Mid-session, save your progress:
+### Saving and resuming
 
 ```
-/linear-sdlc:checkpoint
+/checkpoint            # save current state
+/checkpoint resume     # load the most recent checkpoint
 ```
 
-Captures git state, current ticket context, what you've done, and what's remaining. Writes a checkpoint file to `~/.linear-sdlc/projects/{slug}/checkpoints/`.
+Captures git state, current ticket, completed/remaining work. Writes to `~/.linear-sdlc/projects/{slug}/checkpoints/`.
 
-In a new session, resume:
-
-```
-/linear-sdlc:checkpoint resume
-```
-
-Loads the checkpoint, shows where you left off, offers to switch to the right branch and continue.
-
-### Checking code health
+### Code health
 
 ```
-/linear-sdlc:health
+/health
 ```
 
-Auto-detects your project's quality tools (pytest, eslint, mypy, ruff, tsc, vitest, etc.), runs each one, and computes a weighted composite score:
+Auto-detects your project's quality tools (pytest/jest/vitest, eslint/biome/ruff, tsc/mypy/pyright, vulture/knip), runs each, and computes a weighted composite (tests 30%, lint 25%, types 25%, dead code 20%) with trend vs the previous run.
 
-- **Tests** (30%) — pass rate and coverage
-- **Lint** (25%) — errors and warnings
-- **Type checking** (25%) — type errors
-- **Dead code** (20%) — unused code findings
+## How it works
 
-Displays a dashboard with per-tool scores, composite score, trend vs previous run, and top 3 actionable recommendations.
+### Direct GraphQL via `lsdlc-linear`
 
-## How It Works
+All Linear operations the skills perform — search, list, get, set status, create issues, create relations — go through `bin/lsdlc-linear`. The helper reads `LINEAR_API_KEY` from the environment (with the strict safety rule that the key never appears on argv or in error output) and POSTs to `https://api.linear.app/graphql` using Node 18+'s built-in `fetch`. No npm dependencies, no MCP server, no additional install steps.
 
-### Linear MCP Server
+If you've also installed Linear's official MCP server (recommended for ad-hoc queries — see [above](#why-we-dont-embed-an-mcp-server)), it coexists peacefully. Skills don't call it; you call it directly via Claude Code prompts.
 
-All Linear operations (create issues, update status, search, set dependencies) go through the `@anthropic-ai/linear-mcp-server` MCP server. The plugin manifest declares it; Claude Code starts and supervises it. Your API key is read from your OS keychain via `userConfig`, never written to plaintext config files.
+### Specialist reviews
 
-### Specialist Reviews
+Before PR creation, `/implement` dispatches parallel sub-agents (via the `Agent` tool) that independently review the `git diff` against checklists in `skills/implement/specialists/`. Each specialist returns structured findings classified as **Critical** (must fix), **Warning** (discuss), or **Nit** (skip unless you want to address). Findings are deduplicated by file + line.
 
-Before PR creation, `/linear-sdlc:implement` dispatches parallel sub-agents that independently review the `git diff` against specialist checklists (in `skills/implement/specialists/`). Each specialist returns structured findings classified as:
+### Knowledge base
 
-- **Critical** — must fix before PR (blocks merge)
-- **Warning** — discuss with user (may need fixing)
-- **Nit** — minor suggestion (skipped unless user wants to address)
+Two layers:
 
-Findings are deduplicated by file + line number across specialists.
-
-### Knowledge Base
-
-The knowledge system has two layers:
-
-**Learnings (JSONL)** — Raw operational notes logged during skill execution. Fast, append-only. Each entry has a key, type, confidence score, and source (observed/inferred/documented). Confidence decays over time for observed/inferred entries (-1 point per 30 days).
-
-**Wiki pages (Markdown)** — Synthesized knowledge created when 3+ learnings accumulate on a topic. Run `lsdlc-wiki-ingest` to generate wiki pages from learnings. Run `lsdlc-wiki-lint` to check for stale or inconsistent content.
+- **Learnings (JSONL)** — raw operational notes appended during skill execution. Each entry has a key, type, confidence score, and source (observed/inferred/documented). Confidence decays over time for observed/inferred entries (-1 point per 30 days).
+- **Wiki pages (Markdown)** — synthesized knowledge created when 3+ learnings accumulate on a topic. Run `lsdlc-wiki-ingest` to generate wiki pages from learnings; `lsdlc-wiki-lint` to check for stale or inconsistent content.
 
 Every skill loads relevant learnings at startup via the preamble, so context accumulates across sessions.
 
 ### Timeline
 
-Every skill execution is logged to `timeline.jsonl` (start, completion, outcome). On session start, the preamble checks the timeline to show what happened last on the current branch — helping you pick up where you left off.
+Every skill execution is logged to `timeline.jsonl` (start, completion, outcome). On session start, the preamble checks the timeline and surfaces what happened last on the current branch — helping you pick up where you left off.
 
-## Configuration
+## Hacking on linear-sdlc
 
-Config lives at `~/.linear-sdlc/config.json`. Inside any Claude Code session where the plugin is enabled, the helper scripts in `bin/` are on the Bash tool's `PATH` automatically — so you can call them as bare commands:
+The cloned checkout *is* the source of truth. Edit any `skills/*/SKILL.md`, `bin/*`, `references/*.md`, or `templates/*` file and the change takes effect on Claude Code's next session — symlinks make this loopless.
+
+Adding a new skill:
+
+1. Create `skills/your-skill/SKILL.md` with the standard YAML frontmatter (`name`, `description`, `model`, `effort`, `allowed-tools`).
+2. Re-run `./setup` — the new skill gets symlinked automatically.
+
+Editing an existing skill:
+
+1. Edit `skills/<name>/SKILL.md` directly in the checkout.
+2. No reinstall — Claude Code reads through the symlink on the next invocation.
+
+Resetting state without touching keys:
 
 ```bash
-# Set your Linear team ID (set during onboarding)
-lsdlc-config set linear_team_id VER
-
-# Read a value
-lsdlc-config get linear_team_id
-
-# Show all config
-lsdlc-config list
+mv ~/.linear-sdlc/projects ~/.linear-sdlc/projects.bak
 ```
-
-From a regular terminal outside Claude Code, you'd need the full path: `~/.claude/plugins/cache/<marketplace>/<version>/linear-sdlc/bin/lsdlc-config` (the path varies by Claude Code version and install scope).
-
-## State Directory
-
-All persistent state is stored locally at `~/.linear-sdlc/`:
-
-```
-~/.linear-sdlc/
-├── config.json                    # User config (team ID, preferences)
-├── .onboarding-complete           # First-run gate
-└── projects/
-    └── {slug}/                    # Per-project (derived from git remote)
-        ├── learnings.jsonl        # Operational notes (append-only)
-        ├── timeline.jsonl         # Skill execution history
-        ├── {branch}-reviews.jsonl # Specialist review findings per branch
-        ├── health-history.jsonl   # Health score trend data
-        ├── wiki/                  # Synthesized knowledge pages
-        │   ├── index.md           # Page catalog
-        │   └── log.md             # Chronological activity log
-        └── checkpoints/           # Saved session state
-            └── {timestamp}-{title}.md
-```
-
-The project slug is derived from your git remote URL (e.g., `douglasswm-VerdictCouncil_Backend`), so each repo gets its own isolated state.
-
-## Bin Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `lsdlc-slug` | Derive project slug and branch from git context |
-| `lsdlc-config` | Read/write config.json (`get`, `set`, `list`) |
-| `lsdlc-timeline-log` | Append skill events to timeline.jsonl |
-| `lsdlc-learnings-log` | Append operational learnings to learnings.jsonl |
-| `lsdlc-learnings-search` | Search and filter learnings with confidence decay |
-| `lsdlc-wiki-ingest` | Synthesize learnings into wiki pages |
-| `lsdlc-wiki-lint` | Check wiki for stale/inconsistent content |
-
-## Rotating your Linear API key
-
-```
-/plugin uninstall linear-sdlc@linear-sdlc
-/plugin install linear-sdlc@linear-sdlc
-```
-
-Re-installing prompts you for the API key again and writes the new value to your OS keychain. (A future Claude Code release may add a dedicated `/plugin reconfigure` command — until then, uninstall+reinstall is the supported flow.)
 
 ## License
 

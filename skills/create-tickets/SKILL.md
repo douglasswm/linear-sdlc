@@ -21,6 +21,28 @@ allowed-tools:
 Run this first:
 
 ```bash
+# Resolve repo root from this skill's symlink target (./setup persists this).
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _candidate in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+                    "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_candidate" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_candidate")")/../.." && pwd)"
+      break
+    fi
+  done
+  if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+    LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || echo "")"
+  fi
+  export LINEAR_SDLC_ROOT
+fi
+
+# Source LINEAR_API_KEY for lsdlc-linear if it isn't already in the environment.
+if [ -z "${LINEAR_API_KEY:-}" ] && [ -f "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env" ]; then
+  set +u
+  . "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env"
+  set -u
+fi
+
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
 _SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
@@ -132,26 +154,62 @@ Use AskUserQuestion:
 
 ## Step 4: Create in Linear
 
-Get the team ID: `lsdlc-config get linear_team_id`
+Run **all of Step 4 inside a single Bash tool call** — bash variables (like `$PARENT_ID`, `$CHILD1_ID`) do NOT persist across separate Bash tool calls. If you split this into multiple tool calls, the parent/child references will be empty and you will create orphaned issues.
 
-For each ticket, use the Linear MCP server:
+The pattern is: create parent → capture id → create each child with `--parent "$PARENT_ID"` → capture each child id → call `add-relation` for each blocking edge. All in one shell session.
 
-1. **Create parent issue:**
-   - Title: Feature title from spec
-   - Description: Problem statement + link to spec file
-   - Priority: Based on spec urgency
-   - Labels: Derived from technical approach (e.g., "backend", "frontend", "security")
+Linear priority numbers: `0` = no priority, `1` = urgent, `2` = high, `3` = medium, `4` = low.
 
-2. **Create sub-issues** (in dependency order):
-   - Title: Sub-issue title
-   - Description: Acceptance criteria + relevant technical approach details
-   - Priority: As specified in breakdown
-   - Parent: Link to parent issue created in step 1
-   - Labels: Inherited from parent + specific labels
+Template (substitute the actual title/description/priority/labels for each ticket from the breakdown approved in Step 3):
 
-3. **Set dependencies** between sub-issues:
-   - Use Linear's "blocking/blocked by" relationships
-   - Follow the dependency graph from Step 2
+```bash
+TEAM=$(lsdlc-config get linear_team_id)
+
+# 1. Create the parent issue and capture its identifier.
+#    Use a heredoc-into-variable for the description so the body can span multiple lines safely.
+PARENT_DESC=$(cat <<'PARENT_DESC_EOF'
+Implement rate limiting across API endpoints.
+
+Spec: specs/rate-limiting.md
+PARENT_DESC_EOF
+)
+PARENT_JSON=$(lsdlc-linear create-issue \
+  --team "$TEAM" \
+  --title "Rate Limiting System" \
+  --description "$PARENT_DESC" \
+  --priority 2 \
+  --labels "backend,security")
+PARENT_ID=$(printf '%s' "$PARENT_JSON" | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(j.issue.identifier)')
+echo "Created parent: $PARENT_ID"
+
+# 2. Create each sub-issue, capturing its identifier into a per-child variable.
+#    Repeat this block for every sub-issue in the breakdown — one CHILDn pair per ticket.
+CHILD1_JSON=$(lsdlc-linear create-issue \
+  --team "$TEAM" \
+  --title "Rate limiter middleware" \
+  --description "Redis-based sliding window, configurable per-endpoint" \
+  --priority 2 \
+  --parent "$PARENT_ID" \
+  --labels "backend")
+CHILD1_ID=$(printf '%s' "$CHILD1_JSON" | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(j.issue.identifier)')
+echo "Created child 1: $CHILD1_ID"
+
+CHILD2_JSON=$(lsdlc-linear create-issue \
+  --team "$TEAM" \
+  --title "Apply rate limiting to auth endpoints" \
+  --description "Login, register, password reset rate limited" \
+  --priority 2 \
+  --parent "$PARENT_ID" \
+  --labels "backend,security")
+CHILD2_ID=$(printf '%s' "$CHILD2_JSON" | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(j.issue.identifier)')
+echo "Created child 2: $CHILD2_ID"
+
+# 3. Wire blocking relationships from the dependency graph.
+#    Pass blockedBy / blocks; lsdlc-linear translates to Linear's blocks relation type internally.
+lsdlc-linear add-relation "$CHILD2_ID" blockedBy "$CHILD1_ID"
+```
+
+After running, Step 5's summary table can pull every identifier from the `echo` lines above (still in the same bash output).
 
 ## Step 5: Summary
 

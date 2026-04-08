@@ -26,6 +26,28 @@ The goal of this skill is **diagnostic rigor at component boundaries** — gathe
 Run this first:
 
 ```bash
+# Resolve repo root from this skill's symlink target (./setup persists this).
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _candidate in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+                    "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_candidate" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_candidate")")/../.." && pwd)"
+      break
+    fi
+  done
+  if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+    LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || echo "")"
+  fi
+  export LINEAR_SDLC_ROOT
+fi
+
+# Source LINEAR_API_KEY for lsdlc-linear if it isn't already in the environment.
+if [ -z "${LINEAR_API_KEY:-}" ] && [ -f "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env" ]; then
+  set +u
+  . "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env"
+  set -u
+fi
+
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
 _SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"

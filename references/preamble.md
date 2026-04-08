@@ -14,12 +14,35 @@ Each SKILL.md must include `model` and `effort` fields in its YAML frontmatter t
 | `effort` | `low`, `medium`, `high`, `max` (Opus only) | Reasoning depth — higher = slower but more thorough |
 
 Current assignments:
-- **Opus + high**: `/brainstorm`, `/implement` — deep reasoning, creative/complex work
-- **Sonnet + medium**: root skill, `/create-tickets`, `/health` — structured, mechanical tasks
-- **Sonnet + low**: `/checkpoint` — simple state gathering
-- **Haiku + low**: `/next` — fast query and present
+- **Opus + medium**: `/brainstorm` — feature planning, cross-domain synthesis
+- **Sonnet + medium**: `/implement`, `/create-tickets`, `/debug`, `/health` — full lifecycle, structured judgment, diagnostic discipline
+- **Sonnet + low**: `/checkpoint` — mechanical state dump/restore
+- **Haiku + low**: `/next` — fast list, rank, present
 
 ```bash
+# Resolve repo root from this skill's symlink target (./setup persists this).
+# Sets LINEAR_SDLC_ROOT so skill bodies can reference $LINEAR_SDLC_ROOT/templates/...
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _candidate in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+                    "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_candidate" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_candidate")")/../.." && pwd)"
+      break
+    fi
+  done
+  if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+    LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || echo "")"
+  fi
+  export LINEAR_SDLC_ROOT
+fi
+
+# Source LINEAR_API_KEY for lsdlc-linear if it isn't already in the environment.
+if [ -z "${LINEAR_API_KEY:-}" ] && [ -f "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env" ]; then
+  set +u
+  . "${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/env"
+  set -u
+fi
+
 # Detect project
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
 _SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")

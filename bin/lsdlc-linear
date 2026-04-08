@@ -1,0 +1,503 @@
+#!/usr/bin/env node
+// lsdlc-linear — zero-dep Node helper for Linear's GraphQL API.
+//
+// All Linear operations the linear-sdlc skills perform go through this
+// script. The skills do NOT depend on the official Linear MCP server being
+// installed — they call this directly via Bash.
+//
+// Subcommands:
+//   lsdlc-linear whoami
+//   lsdlc-linear search-issues <query> [--team KEY] [--state open|closed|all] [--limit N]
+//   lsdlc-linear list-assigned         [--team KEY] [--status "Todo,Backlog"] [--limit N]
+//   lsdlc-linear get-issue <ID>                                    # e.g. VER-42
+//   lsdlc-linear set-status <ID> <state-name>
+//   lsdlc-linear create-issue --title "T" --description "D"
+//                             [--team KEY] [--priority N]
+//                             [--labels l1,l2] [--parent VER-40]
+//   lsdlc-linear add-relation <ID> <relation> <other-ID>           # blocks | blockedBy
+//
+// All output is JSON on stdout. Errors go to stderr.
+// Exit codes: 0 ok, 1 arg error, 2 API/network error, 3 auth (401/403).
+//
+// SAFETY: LINEAR_API_KEY is read from process.env. It NEVER appears on argv,
+// in shell strings, or in error output. Do not change this without thinking.
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const ENDPOINT = 'https://api.linear.app/graphql';
+
+function err(msg, code = 2) {
+  process.stderr.write(`lsdlc-linear: ${msg}\n`);
+  process.exit(code);
+}
+
+// ─── Resolve API key ──────────────────────────────────────────
+// Parses ~/.linear-sdlc/env line-by-line in pure JS (never shell-sources).
+// Skips comments (`#`-prefixed lines) and tolerates `export ` prefixes.
+// Strict: only accepts the [A-Za-z0-9_-]+ charset that ./setup writes,
+// so a hand-edited file with weird chars surfaces a clear error instead
+// of being silently truncated or carried into HTTP headers.
+function resolveApiKey() {
+  if (process.env.LINEAR_API_KEY) return process.env.LINEAR_API_KEY;
+  const stateDir = process.env.LSDLC_STATE_DIR || path.join(os.homedir(), '.linear-sdlc');
+  const envFile = path.join(stateDir, 'env');
+  if (fs.existsSync(envFile)) {
+    const lines = fs.readFileSync(envFile, 'utf8').split(/\r?\n/);
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      // Match: [export ]LINEAR_API_KEY=value or 'value' or "value"
+      const m = line.match(/^(?:export\s+)?LINEAR_API_KEY=(['"]?)([^'"\r\n]+)\1\s*$/);
+      if (m) {
+        const value = m[2];
+        if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+          err(
+            `LINEAR_API_KEY in ${envFile} contains invalid characters.\n` +
+              "  Linear personal API keys are alphanumeric plus _ and -.\n" +
+              "  Re-run ./setup or fix the file by hand.",
+            3
+          );
+        }
+        return value;
+      }
+    }
+  }
+  err(
+    "LINEAR_API_KEY not found.\n" +
+      "  Run ./setup in the linear-sdlc repo, or export LINEAR_API_KEY in your shell.",
+    3
+  );
+}
+
+// ─── GraphQL transport ────────────────────────────────────────
+async function linear(query, variables) {
+  const apiKey = resolveApiKey();
+  let res;
+  try {
+    res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': apiKey,         // Linear personal API keys: NO Bearer prefix
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query, variables: variables || {} }),
+    });
+  } catch (e) {
+    err(`network error: ${e.message}`, 2);
+  }
+  if (res.status === 401 || res.status === 403) {
+    err(`auth failed (HTTP ${res.status}) — check LINEAR_API_KEY`, 3);
+  }
+  let body;
+  try {
+    body = await res.json();
+  } catch (e) {
+    err(`non-JSON response (HTTP ${res.status})`, 2);
+  }
+  if (body.errors && body.errors.length) {
+    // Don't include the request body or headers in error output (key safety)
+    const messages = body.errors.map(e => e.message).join('; ');
+    err(`graphql error: ${messages}`, 2);
+  }
+  if (body.data == null) {
+    err(`empty response from Linear (HTTP ${res.status})`, 2);
+  }
+  return body.data;
+}
+
+// ─── Tiny argv parser ─────────────────────────────────────────
+function parseFlags(args, schema) {
+  // schema: { number: ['priority', ...], default: { ... } }
+  const out = Object.assign({}, schema.default || {});
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      let key, val;
+      if (eq >= 0) {
+        key = a.slice(2, eq);
+        val = a.slice(eq + 1);
+      } else {
+        key = a.slice(2);
+        const next = args[i + 1];
+        // Reject `--flag --otherflag` — the next arg is a flag, not a value
+        if (next === undefined || next.startsWith('--')) {
+          err(`missing value for --${key}`, 1);
+        }
+        val = next;
+        i++;
+      }
+      if ((schema.number || []).includes(key)) {
+        const n = parseInt(val, 10);
+        if (Number.isNaN(n)) err(`--${key} must be an integer (got "${val}")`, 1);
+        out[key] = n;
+      } else {
+        out[key] = val;
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  out._ = positional;
+  return out;
+}
+
+function printJson(data) {
+  process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+}
+
+// ─── Subcommand: whoami ───────────────────────────────────────
+async function cmdWhoami() {
+  const data = await linear(`query { viewer { id name email } }`);
+  printJson(data.viewer);
+}
+
+// ─── Subcommand: search-issues ────────────────────────────────
+async function cmdSearchIssues(args) {
+  const flags = parseFlags(args, {
+    number: ['limit'],
+    default: { limit: 20 },
+  });
+  const query = (flags._[0] || '').trim();
+  if (!query) err('usage: lsdlc-linear search-issues <query> [--team KEY] [--limit N]', 1);
+
+  // Use issueSearch for full-text search across the workspace
+  const gql = `
+    query Search($query: String!, $first: Int!) {
+      issueSearch(query: $query, first: $first) {
+        nodes {
+          id
+          identifier
+          title
+          state { name type }
+          priority
+          team { key name }
+          url
+        }
+      }
+    }
+  `;
+  const data = await linear(gql, { query, first: flags.limit });
+  let nodes = data.issueSearch.nodes;
+  if (flags.team) {
+    nodes = nodes.filter(n => n.team && n.team.key === flags.team);
+  }
+  printJson({ count: nodes.length, issues: nodes });
+}
+
+// ─── Subcommand: list-assigned ────────────────────────────────
+async function cmdListAssigned(args) {
+  const flags = parseFlags(args, {
+    number: ['limit'],
+    default: { limit: 20, status: 'Todo,Backlog' },
+  });
+  const statuses = String(flags.status).split(',').map(s => s.trim()).filter(Boolean);
+
+  // Query: issues where assignee is the viewer, optionally filtered by team key + state name
+  // Linear's filter syntax: { assignee: { isMe: { eq: true } }, state: { name: { in: [...] } } }
+  const filter = {
+    assignee: { isMe: { eq: true } },
+    state: { name: { in: statuses } },
+  };
+  if (flags.team) {
+    filter.team = { key: { eq: flags.team } };
+  }
+
+  const gql = `
+    query ListAssigned($filter: IssueFilter!, $first: Int!) {
+      issues(filter: $filter, first: $first, orderBy: updatedAt) {
+        nodes {
+          id
+          identifier
+          title
+          priority
+          priorityLabel
+          state { name type }
+          team { key name }
+          labels { nodes { name } }
+          cycle { name endsAt }
+          createdAt
+          updatedAt
+          url
+        }
+      }
+    }
+  `;
+  const data = await linear(gql, { filter, first: flags.limit });
+  printJson({ count: data.issues.nodes.length, issues: data.issues.nodes });
+}
+
+// ─── Subcommand: get-issue ────────────────────────────────────
+async function cmdGetIssue(args) {
+  const id = args[0];
+  if (!id) err('usage: lsdlc-linear get-issue <ID>', 1);
+
+  // Linear accepts the prefixed identifier directly
+  const gql = `
+    query GetIssue($id: String!) {
+      issue(id: $id) {
+        id
+        identifier
+        title
+        description
+        priority
+        priorityLabel
+        state { id name type }
+        team { id key name }
+        assignee { id name email }
+        labels { nodes { id name } }
+        parent { identifier title state { name } }
+        children { nodes { identifier title state { name } } }
+        relations {
+          nodes {
+            type
+            relatedIssue { identifier title state { name } }
+          }
+        }
+        comments(first: 20) {
+          nodes {
+            body
+            user { name }
+            createdAt
+          }
+        }
+        createdAt
+        updatedAt
+        url
+      }
+    }
+  `;
+  const data = await linear(gql, { id });
+  if (!data.issue) err(`issue not found: ${id}`, 1);
+  printJson(data.issue);
+}
+
+// ─── Subcommand: set-status ───────────────────────────────────
+async function cmdSetStatus(args) {
+  const id = args[0];
+  const stateName = args[1];
+  if (!id || !stateName) err('usage: lsdlc-linear set-status <ID> <state-name>', 1);
+
+  // 1. Look up the issue to get its team + current state
+  const lookup = await linear(
+    `query Lookup($id: String!) {
+      issue(id: $id) { id team { id } state { id name } }
+    }`,
+    { id }
+  );
+  if (!lookup.issue) err(`issue not found: ${id}`, 1);
+
+  // 2. Find the workflow state with the given name on that team.
+  //    `first: 50` covers any realistic team workflow (Linear caps at ~20 in practice).
+  const states = await linear(
+    `query States($teamId: String!) {
+      workflowStates(filter: { team: { id: { eq: $teamId } } }, first: 50) {
+        nodes { id name type }
+      }
+    }`,
+    { teamId: lookup.issue.team.id }
+  );
+  const target = states.workflowStates.nodes.find(
+    s => s.name.toLowerCase() === stateName.toLowerCase()
+  );
+  if (!target) {
+    const available = states.workflowStates.nodes.map(s => s.name).join(', ');
+    err(`no workflow state named "${stateName}" on this team. Available: ${available}`, 1);
+  }
+
+  // 3. Update the issue
+  const update = await linear(
+    `mutation SetState($id: String!, $stateId: String!) {
+      issueUpdate(id: $id, input: { stateId: $stateId }) {
+        success
+        issue { identifier state { name } }
+      }
+    }`,
+    { id: lookup.issue.id, stateId: target.id }
+  );
+  printJson(update.issueUpdate);
+}
+
+// ─── Subcommand: create-issue ─────────────────────────────────
+async function cmdCreateIssue(args) {
+  const flags = parseFlags(args, {
+    number: ['priority'],
+  });
+  if (!flags.title) err('usage: lsdlc-linear create-issue --title "..." [--description "..."] [--team KEY] [--priority N] [--labels l1,l2] [--parent VER-40]', 1);
+
+  // Resolve team ID from key
+  let teamId;
+  if (flags.team) {
+    const teams = await linear(
+      `query Teams($key: String!) {
+        teams(filter: { key: { eq: $key } }) { nodes { id key } }
+      }`,
+      { key: flags.team }
+    );
+    if (!teams.teams.nodes.length) err(`team not found: ${flags.team}`, 1);
+    teamId = teams.teams.nodes[0].id;
+  } else {
+    // Default to viewer's first team
+    const v = await linear(`query { viewer { teams(first: 1) { nodes { id key } } } }`);
+    if (!v.viewer.teams.nodes.length) err('no team specified and viewer has no teams', 1);
+    teamId = v.viewer.teams.nodes[0].id;
+  }
+
+  // Resolve parent ID if given
+  let parentId;
+  if (flags.parent) {
+    const p = await linear(
+      `query GetParent($id: String!) { issue(id: $id) { id } }`,
+      { id: flags.parent }
+    );
+    if (!p.issue) err(`parent issue not found: ${flags.parent}`, 1);
+    parentId = p.issue.id;
+  }
+
+  // Resolve label IDs if given. `first: 250` covers any realistic team
+  // (Linear teams rarely exceed a few dozen labels).
+  let labelIds;
+  if (flags.labels) {
+    const wantedNames = flags.labels.split(',').map(s => s.trim()).filter(Boolean);
+    const labels = await linear(
+      `query Labels($teamId: ID!) {
+        team(id: $teamId) { labels(first: 250) { nodes { id name } } }
+      }`,
+      { teamId }
+    );
+    labelIds = labels.team.labels.nodes
+      .filter(l => wantedNames.some(w => w.toLowerCase() === l.name.toLowerCase()))
+      .map(l => l.id);
+    const missing = wantedNames.filter(
+      w => !labels.team.labels.nodes.some(l => l.name.toLowerCase() === w.toLowerCase())
+    );
+    if (missing.length) {
+      process.stderr.write(`lsdlc-linear: warning: labels not found on team: ${missing.join(', ')}\n`);
+    }
+  }
+
+  const input = {
+    teamId,
+    title: flags.title,
+  };
+  if (flags.description) input.description = flags.description;
+  if (flags.priority !== undefined) {
+    // Linear priorities: 0=none, 1=urgent, 2=high, 3=medium, 4=low
+    if (!Number.isInteger(flags.priority) || flags.priority < 0 || flags.priority > 4) {
+      err('--priority must be 0 (none), 1 (urgent), 2 (high), 3 (medium), or 4 (low)', 1);
+    }
+    input.priority = flags.priority;
+  }
+  if (parentId) input.parentId = parentId;
+  if (labelIds && labelIds.length) input.labelIds = labelIds;
+
+  const result = await linear(
+    `mutation Create($input: IssueCreateInput!) {
+      issueCreate(input: $input) {
+        success
+        issue { id identifier title url state { name } }
+      }
+    }`,
+    { input }
+  );
+  printJson(result.issueCreate);
+}
+
+// ─── Subcommand: add-relation ─────────────────────────────────
+async function cmdAddRelation(args) {
+  const id = args[0];
+  const relation = args[1]; // "blocks" or "blockedBy" → Linear uses "blocks" / "blocked_by"
+  const otherId = args[2];
+  if (!id || !relation || !otherId) {
+    err('usage: lsdlc-linear add-relation <ID> <blocks|blockedBy> <other-ID>', 1);
+  }
+  // Linear's IssueRelationType is an enum: blocks, duplicate, related, similar
+  // "blockedBy" doesn't exist as a type — instead, you create a "blocks" relation
+  // FROM the blocker TO the blocked issue. So if user says "VER-42 blockedBy VER-41",
+  // we create relation: VER-41 blocks VER-42.
+  let fromId, toId, type;
+  if (relation === 'blocks') {
+    fromId = id;
+    toId = otherId;
+    type = 'blocks';
+  } else if (relation === 'blockedBy' || relation === 'blocked_by') {
+    fromId = otherId;
+    toId = id;
+    type = 'blocks';
+  } else {
+    err(`unknown relation: ${relation} (expected: blocks, blockedBy)`, 1);
+  }
+
+  // Resolve identifiers → UUIDs
+  const lookup = await linear(
+    `query Pair($a: String!, $b: String!) {
+      a: issue(id: $a) { id }
+      b: issue(id: $b) { id }
+    }`,
+    { a: fromId, b: toId }
+  );
+  if (!lookup.a) err(`issue not found: ${fromId}`, 1);
+  if (!lookup.b) err(`issue not found: ${toId}`, 1);
+
+  const result = await linear(
+    `mutation CreateRel($issueId: String!, $relatedId: String!, $type: String!) {
+      issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedId, type: $type }) {
+        success
+        issueRelation { id type }
+      }
+    }`,
+    { issueId: lookup.a.id, relatedId: lookup.b.id, type }
+  );
+  printJson(result.issueRelationCreate);
+}
+
+// ─── Dispatcher ───────────────────────────────────────────────
+async function main() {
+  const [, , subcmd, ...rest] = process.argv;
+  if (!subcmd || subcmd === '-h' || subcmd === '--help') {
+    process.stdout.write(
+      [
+        'Usage: lsdlc-linear <subcommand> [args]',
+        '',
+        'Subcommands:',
+        '  whoami',
+        '  search-issues <query> [--team KEY] [--limit N]',
+        '  list-assigned         [--team KEY] [--status "Todo,Backlog"] [--limit N]',
+        '  get-issue <ID>',
+        '  set-status <ID> <state-name>',
+        '  create-issue --title "..." [--description "..."] [--team KEY] [--priority N]',
+        '               [--labels l1,l2] [--parent VER-40]',
+        '  add-relation <ID> <blocks|blockedBy> <other-ID>',
+        '',
+        'Reads LINEAR_API_KEY from env, falling back to ~/.linear-sdlc/env.',
+        '',
+      ].join('\n')
+    );
+    process.exit(subcmd ? 0 : 1);
+  }
+
+  try {
+    switch (subcmd) {
+      case 'whoami':        await cmdWhoami(); break;
+      case 'search-issues': await cmdSearchIssues(rest); break;
+      case 'list-assigned': await cmdListAssigned(rest); break;
+      case 'get-issue':     await cmdGetIssue(rest); break;
+      case 'set-status':    await cmdSetStatus(rest); break;
+      case 'create-issue':  await cmdCreateIssue(rest); break;
+      case 'add-relation':  await cmdAddRelation(rest); break;
+      default:
+        err(`unknown subcommand: ${subcmd}. Run 'lsdlc-linear --help'.`, 1);
+    }
+  } catch (e) {
+    // Catch-all — never echo the API key (it's only in env, not in any e.message
+    // we construct, but be defensive against future changes).
+    err(`unexpected: ${e.message || String(e)}`, 2);
+  }
+}
+
+main();

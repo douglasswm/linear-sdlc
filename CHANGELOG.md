@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.0.0 — 2026-04-08 — Skills pack revert; direct GraphQL by default
+
+linear-sdlc is no longer a Claude Code plugin. v1's plugin packaging caused recurring setup pain (MCP reconnect failures, `userConfig` interpolation fighting `/doctor`, brittle dependency on a specific `npx -y` MCP package). v2 reverts to the gstack-style skills pack model — `git clone` + `./setup` — and uses direct Linear GraphQL via a new bundled helper. The official Linear MCP server is now an optional install the user runs themselves.
+
+### Breaking changes
+
+- **Distribution model.** No longer a plugin. Install via:
+  ```bash
+  git clone git@github.com:douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc
+  cd ~/.claude/skills/linear-sdlc
+  ./setup
+  ```
+  See README → "Migrating from v1" for the upgrade path. v1 users must `/plugin uninstall linear-sdlc@linear-sdlc` first.
+- **API key location.** Moves from the OS keychain (plugin `userConfig`) to `~/.linear-sdlc/env` (mode `0600`), sourced by the skill preamble. Alternatives — 1Password CLI, direnv, exporting from your shell rc — are documented in the README.
+- **Skill names default to short.** `/brainstorm`, `/next`, `/implement`, `/create-tickets`, `/checkpoint`, `/debug`, `/health`. Opt back into namespaced names with `./setup --prefix` (which gives `/linear-sdlc-brainstorm`, etc. — note the dash, not the v1 colon).
+
+### Additions
+
+- **`setup` script** at the repo root, modeled on `gstack/setup`. Idempotent, interactive, prompts for skill prefix / API key / team key. Validates the install. Handles re-runs safely.
+- **`bin/lsdlc-linear`** — zero-dependency Node helper wrapping Linear's GraphQL API. Subcommands: `whoami`, `search-issues`, `list-assigned`, `get-issue`, `set-status`, `create-issue`, `add-relation`. Reads `LINEAR_API_KEY` from `process.env` (with a fallback to parsing `~/.linear-sdlc/env` in pure JS — never shell-source). The API key never appears on argv or in error output. Every Linear operation linear-sdlc skills perform now goes through this helper.
+- **ETHOS.md principle:** "Depend on Official Integrations" — codifies why we prompt users to install Linear's MCP separately rather than embedding it.
+
+### Removals
+
+- **`.claude-plugin/` directory** (`plugin.json`, `marketplace.json`, `mcp.json`).
+- **Embedded `@anthropic-ai/linear-mcp-server` reference.** linear-sdlc no longer ships or registers an MCP server. `setup` prints instructions for installing Linear's first-party HTTP MCP (`claude mcp add --transport http linear https://mcp.linear.app/mcp`) but never installs it automatically. Skills do not depend on the MCP being present — they use direct GraphQL via `lsdlc-linear`.
+- **All "Use the Linear MCP server" natural-language instructions** in skill bodies (replaced with concrete `lsdlc-linear` Bash invocations and inline `node -e` parsing snippets).
+- **`${CLAUDE_PLUGIN_ROOT}` reference** in `skills/brainstorm/SKILL.md` Step 5 (replaced with `$LINEAR_SDLC_ROOT/templates/spec-template.md`, where `$LINEAR_SDLC_ROOT` is exported by the preamble).
+
+### Preserved
+
+- **`~/.linear-sdlc/projects/{slug}/` state layout is unchanged.** Learnings, timelines, checkpoints, wiki pages, per-branch review files from v1 all carry over intact.
+- **All `bin/lsdlc-*` scripts** (slug, config, timeline-log, learnings-log, learnings-search, wiki-ingest, wiki-lint) — they were always portable; setup now wires them onto PATH via `~/.local/bin` symlinks.
+- **`skills/implement/specialists/`** — sub-agent checklists are unchanged. The `/implement` skill still dispatches them as parallel sub-agents via the `Agent` tool.
+- **All seven skill model/effort defaults.** `/brainstorm` Opus/medium, `/implement` Sonnet/medium, etc.
+
 ## v1.0.1 — 2026-04-08 — /doctor warning fix
 
 ### Fixed
