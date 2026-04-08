@@ -108,6 +108,60 @@ One change, one reason. The fix should address the root cause identified in Step
 
 If the user picks option 1, apply the fix. Remove the instrumentation added in Step 3. Re-run the repro to confirm the bug is gone.
 
+## Step 6.5: Auto-Write Incident to Wiki (on confirmed fix only)
+
+If the user picked **Apply the minimal fix** AND the re-run confirms the
+bug is resolved, auto-write an incident page (gated by `wiki_auto_incident`,
+default true). **Do NOT write on the "Investigate further" or "Hand back"
+branches** — a half-debugged session is not a well-formed incident.
+
+```bash
+WIKI_DIR="$(lsdlc-wiki path 2>/dev/null)"
+AUTO_INCIDENT="$(lsdlc-config get wiki_auto_incident 2>/dev/null || echo true)"
+```
+
+If `$WIKI_DIR` is non-empty AND the directory exists AND `$AUTO_INCIDENT`
+is `true`:
+
+1. Read `$WIKI_DIR/index.md` to find related entity/concept pages on the
+   data path identified in Step 2.
+2. Read those related pages.
+3. Derive a kebab-case slug from the bug symptom (e.g.,
+   `login-loop-on-expired-token`).
+4. Draft `$WIKI_DIR/incidents/<slug>.md` with:
+   - Frontmatter: `updated: <ISO timestamp>`, `sources:` list
+   - Title
+   - **Repro** — the exact command and verbatim failing output
+   - **Boundary walk** — the components on the data path
+   - **Root cause** — the specific boundary where data first went wrong,
+     with a one-paragraph explanation
+   - **Fix** — one-line description + a relative link to the fix commit
+     if available (`git rev-parse HEAD` is fine)
+   - **Related** — relative-link citations to the entity/concept pages
+     you identified in step 1
+5. Optionally draft small updates to the related entity pages adding a
+   "Known issues" section or extending an existing one, with a relative
+   link back to the incident. Insert contradiction callouts on any
+   conflicting claims.
+6. **Secret-scan every draft:**
+   ```bash
+   for draft in "$WIKI_DIR/incidents/<slug>.md" <other drafts>; do
+     lsdlc-wiki secret-scan "$draft" || { echo "ABORT: secret-scan hit"; break; }
+   done
+   ```
+   Any hit aborts the **entire** ingest. Do NOT write any file.
+7. Write all drafts.
+8. `lsdlc-wiki index-upsert incidents/<slug>.md Incidents "<short description>"`
+9. For each updated entity page, run index-upsert too.
+10. `lsdlc-wiki log-append ingest "incident: <slug>" --touched "<comma-separated paths>"`
+11. Print a summary:
+    `WIKI: wrote incidents/<slug>.md + updated <N> related pages (secret-scan: ok)`
+
+If `$AUTO_INCIDENT` is `false`, print a single candidate line instead:
+`WIKI: candidate for /wiki ingest --incident <slug>`
+
+**Never auto-commit.** The user reviews the wiki diff before committing.
+
 ## Soft Invariant
 
 **Recommendation, not mandate:** don't propose fixes during Steps 1-4. If you feel the urge to jump ahead — because it "looks obvious" — note it as a candidate, log a learning about the temptation if it felt strong, and finish gathering evidence first. The user can override at any point.

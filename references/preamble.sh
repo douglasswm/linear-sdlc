@@ -90,11 +90,51 @@ _SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2)
 if [ -z "$_SLUG" ]; then
   _SLUG=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 fi
-_PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
-mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
+_PROJ="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/projects/${_SLUG}"
+mkdir -p "$_PROJ/checkpoints"
 
 echo "BRANCH: $_BRANCH"
 echo "PROJECT: $_SLUG"
+
+# ─── Wiki resolution ───────────────────────────────────────────
+# _WIKI is the effective wiki dir for the current project. Resolution is
+# owned by `lsdlc-wiki path` and respects wiki_scope / wiki_path in config.
+# Empty output means wiki is off, not initialized, or not resolvable from
+# the current directory.
+_WIKI="$(lsdlc-wiki path 2>/dev/null || true)"
+export _WIKI
+if [ -n "$_WIKI" ] && [ -d "$_WIKI" ]; then
+  _WIKI_PAGES=$(find "$_WIKI" -name '*.md' ! -name CLAUDE.md ! -name index.md ! -name log.md 2>/dev/null | wc -l | tr -d ' ')
+  # Contradiction count: only real pages, never the schema template or meta files.
+  _WIKI_CONTRADICTIONS=$(find "$_WIKI" -name '*.md' ! -name CLAUDE.md ! -name index.md ! -name log.md -exec grep -l 'Contradiction noted' {} \; 2>/dev/null | wc -l | tr -d ' ')
+  _WIKI_LAST=$(grep '^## \[' "$_WIKI/log.md" 2>/dev/null | tail -1 | sed 's/^## //')
+  _WIKI_LINE="WIKI: $_WIKI_PAGES pages"
+  [ "${_WIKI_CONTRADICTIONS:-0}" != "0" ] && _WIKI_LINE="$_WIKI_LINE | $_WIKI_CONTRADICTIONS contradictions"
+  [ -n "$_WIKI_LAST" ] && _WIKI_LINE="$_WIKI_LINE | last: $_WIKI_LAST"
+  if [ "$(lsdlc-config get wiki_linear_sync 2>/dev/null)" = "true" ]; then
+    _WIKI_LINE="$_WIKI_LINE | linear-sync: on"
+  fi
+  echo "$_WIKI_LINE"
+  unset _WIKI_PAGES _WIKI_CONTRADICTIONS _WIKI_LAST _WIKI_LINE
+elif [ -n "$_WIKI" ]; then
+  echo "WIKI: not initialized — run /wiki init to scaffold"
+fi
+
+# ─── One-time upgrade notice ───────────────────────────────────
+# `./setup` drops this marker when it flips an existing install to
+# wiki_scope=repo. Show the notice once, then delete the marker.
+_WIKI_UPGRADE_MARKER="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}/.wiki-upgrade-pending"
+if [ -f "$_WIKI_UPGRADE_MARKER" ]; then
+  cat <<'EOF'
+NOTICE: linear-sdlc wiki mode changed to 'repo' (was implicit 'private').
+        Your wiki now belongs in <repo>/.linear-sdlc/wiki/ (shared via git).
+        Legacy home-dir wiki at ~/.linear-sdlc/projects/<slug>/wiki is still intact.
+        Run /wiki init to scaffold, /wiki migrate to import legacy content,
+        or `lsdlc-config set wiki_scope private` to revert.
+EOF
+  rm -f "$_WIKI_UPGRADE_MARKER"
+fi
+unset _WIKI_UPGRADE_MARKER
 
 # ─── Session tracking ──────────────────────────────────────────
 _SESSION_ID="$$-$(date +%s)"

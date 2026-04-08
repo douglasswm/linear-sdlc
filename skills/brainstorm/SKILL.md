@@ -62,6 +62,38 @@ If no topic was provided, use AskUserQuestion:
 **Context:** Tell me what you'd like to build. A sentence or two is fine — we'll flesh it out together.
 ```
 
+## Step 1.5: Read Prior Art from the Wiki
+
+Before searching Linear, check whether the wiki already has relevant
+material on this topic. This is read-only — do not write anything.
+
+```bash
+TOPIC="rate limiting"  # substitute the actual topic
+WIKI_DIR="$(lsdlc-wiki path 2>/dev/null)"
+if [ -n "$WIKI_DIR" ] && [ -d "$WIKI_DIR" ]; then
+  lsdlc-wiki search "$TOPIC" --limit 5 2>/dev/null
+fi
+```
+
+The output is JSON with `{backend, count, results[]}`. Each result has
+`{path, score, snippet}`. If any hits come back, read the top 2-3 pages
+via the `Read` tool and surface a brief "prior art" summary to the user
+before moving on:
+
+```
+## Prior art in wiki
+
+- **entities/api-gateway.md** — already describes rate limiting at the
+  router level; notes a 100/min default.
+- **concepts/rate-limiting.md** — a concept page explaining the design
+  rationale.
+
+Want me to build on these, or treat the new feature as orthogonal?
+```
+
+If the wiki is uninitialized or nothing matches, skip this step silently
+and move to Step 2.
+
 ## Step 2: Search for Duplicates
 
 Search Linear for existing issues related to the topic via the bundled `lsdlc-linear` helper (direct GraphQL — no MCP needed):

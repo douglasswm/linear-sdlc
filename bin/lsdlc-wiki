@@ -1,0 +1,952 @@
+#!/usr/bin/env node
+// lsdlc-wiki — plumbing CLI for the linear-sdlc LLM Wiki.
+//
+// This tool is pure mechanism. The LLM is the author — it reads sources,
+// drafts prose pages, and writes them. This CLI handles:
+//   - Path resolution (repo vs private vs off)
+//   - Scaffolding (/wiki init)
+//   - Index and log maintenance (log.md is union-merge friendly)
+//   - Structural lint (orphans, contradictions, stale pages, data gaps)
+//   - Hard secret-scan gate (aborts ingest before any file is written)
+//   - Naive grep search with auto-routing to qmd when installed
+//   - Deterministic Linear Document UUID derivation for one-way sync
+//   - Migration of legacy home-dir wiki content
+//
+// Subcommands:
+//   lsdlc-wiki path
+//   lsdlc-wiki init [--force]
+//   lsdlc-wiki log-append <kind> <title> [--touched file1,file2,...]
+//   lsdlc-wiki index-upsert <page-path> <category> <summary>
+//   lsdlc-wiki lint
+//   lsdlc-wiki search <query> [--backend auto|grep|qmd] [--limit N]
+//   lsdlc-wiki secret-scan <file> [<file> ...]
+//   lsdlc-wiki migrate
+//   lsdlc-wiki ingest-source <path>
+//   lsdlc-wiki sync-linear [--dry-run] [--include-sources]
+//   lsdlc-wiki linear-map <page-path>
+//   lsdlc-wiki qmd-setup
+//   lsdlc-wiki qmd-refresh [--embed]
+//
+// All output is either human-readable lines (default) or JSON when --json
+// is passed (where supported). Errors go to stderr.
+// Exit codes:
+//   0  success
+//   1  usage / argument error
+//   2  structural error (missing wiki, bad config)
+//   3  secret-scan hit (caller should abort any in-flight write)
+//   4  external tool missing (qmd, node-less env, etc.)
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const { execFileSync, spawnSync } = require('child_process');
+
+// ─── Small utilities ──────────────────────────────────────────
+function err(msg, code = 2) {
+  process.stderr.write(`lsdlc-wiki: ${msg}\n`);
+  process.exit(code);
+}
+
+function run(cmd, args, opts = {}) {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', ...opts }).trim();
+  } catch (e) {
+    return null;
+  }
+}
+
+function which(cmd) {
+  const p = run('sh', ['-c', `command -v ${cmd}`]);
+  return p || null;
+}
+
+function stateDir() {
+  return process.env.LSDLC_STATE_DIR || path.join(os.homedir(), '.linear-sdlc');
+}
+
+function configGet(key) {
+  const v = run('lsdlc-config', ['get', key]);
+  return v || '';
+}
+
+function configSet(key, value) {
+  run('lsdlc-config', ['set', key, value]);
+}
+
+function slug() {
+  // Match lsdlc-slug's derivation exactly so qmd collections line up
+  // with whatever the preamble / timeline / learnings use.
+  const out = run('lsdlc-slug');
+  if (out) {
+    const m = out.match(/^SLUG=(.+)$/m);
+    if (m) return m[1].trim();
+  }
+  return path.basename(process.cwd()).replace(/[^a-zA-Z0-9._-]/g, '');
+}
+
+function gitRoot() {
+  return run('git', ['rev-parse', '--show-toplevel']);
+}
+
+function ensureDir(p) {
+  fs.mkdirSync(p, { recursive: true });
+}
+
+function readFileOrEmpty(p) {
+  try { return fs.readFileSync(p, 'utf8'); } catch { return ''; }
+}
+
+function walkMarkdown(dir) {
+  // Recursive walk for .md files. Returns absolute paths.
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  const stack = [dir];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }); }
+    catch { continue; }
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;  // skip .gitattributes, .linear-sync.json, etc.
+      const full = path.join(cur, e.name);
+      if (e.isDirectory()) stack.push(full);
+      else if (e.isFile() && e.name.endsWith('.md')) out.push(full);
+    }
+  }
+  return out;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function nowLogPrefix() {
+  // ## [YYYY-MM-DD HH:MM]
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ─── Wiki path resolution ─────────────────────────────────────
+// Resolution order:
+//   1. wiki_path config key (absolute or relative to repo root)
+//   2. wiki_scope=repo   → <git-root>/.linear-sdlc/wiki (needs git)
+//   3. wiki_scope=private → ~/.linear-sdlc/projects/<slug>/wiki
+//   4. wiki_scope=off    → ''
+//   5. unset             → fall back to 'private' for backward compat
+function resolveWikiPath() {
+  const scope = (configGet('wiki_scope') || '').trim();
+  const override = (configGet('wiki_path') || '').trim();
+
+  if (scope === 'off') return '';
+
+  if (override) {
+    if (path.isAbsolute(override)) return override;
+    const root = gitRoot();
+    if (root) return path.join(root, override);
+    return path.resolve(override);
+  }
+
+  if (scope === 'repo' || scope === '') {
+    // scope === '' means unset; new-install default is 'repo' per setup,
+    // but an existing user without wiki_scope should get the legacy path.
+    // We distinguish: if scope is literally 'repo' (set), use repo path.
+    // If unset, fall back to private so upgrades don't silently move state.
+    if (scope === 'repo') {
+      const root = gitRoot();
+      if (!root) return '';  // not in a repo — silently disabled
+      return path.join(root, '.linear-sdlc', 'wiki');
+    }
+    // Unset → private fallback
+    return path.join(stateDir(), 'projects', slug(), 'wiki');
+  }
+
+  if (scope === 'private') {
+    return path.join(stateDir(), 'projects', slug(), 'wiki');
+  }
+
+  // Unknown scope — treat as off
+  return '';
+}
+
+// ─── Subcommand: path ─────────────────────────────────────────
+function cmdPath() {
+  const p = resolveWikiPath();
+  if (p) process.stdout.write(p + '\n');
+  // Empty output = wiki disabled or unresolvable; consumers check for empty.
+}
+
+// ─── Subcommand: init ─────────────────────────────────────────
+const SCHEMA_TEMPLATE_REL = path.join('references', 'wiki-schema-template.md');
+
+function linearSdlcRoot() {
+  // Resolve linear-sdlc source dir so we can read the schema template.
+  // Matches the preamble's strategy.
+  const cfg = (configGet('source_dir') || '').trim();
+  if (cfg && fs.existsSync(path.join(cfg, SCHEMA_TEMPLATE_REL))) return cfg;
+  // Fall back: walk up from this script's own location.
+  const me = __filename;
+  // bin/lsdlc-wiki → dirname(dirname(me)) is the repo root
+  const guess = path.resolve(path.dirname(me), '..');
+  if (fs.existsSync(path.join(guess, SCHEMA_TEMPLATE_REL))) return guess;
+  return null;
+}
+
+function cmdInit(args) {
+  const force = args.includes('--force');
+  const wiki = resolveWikiPath();
+  if (!wiki) {
+    err('wiki is disabled (wiki_scope=off) or could not be resolved. Set wiki_scope=repo and run this inside a git repo.', 2);
+  }
+
+  ensureDir(wiki);
+  const subdirs = [
+    'entities', 'concepts', 'tickets', 'incidents', 'queries',
+    'sources', 'sources/articles', 'sources/transcripts',
+    'sources/assets', 'sources/legacy',
+  ];
+  for (const sub of subdirs) ensureDir(path.join(wiki, sub));
+
+  // CLAUDE.md — copy from the repo's schema template
+  const root = linearSdlcRoot();
+  const schemaDest = path.join(wiki, 'CLAUDE.md');
+  if (!fs.existsSync(schemaDest) || force) {
+    if (root) {
+      const src = path.join(root, SCHEMA_TEMPLATE_REL);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, schemaDest);
+      } else {
+        fs.writeFileSync(schemaDest, DEFAULT_SCHEMA_FALLBACK, 'utf8');
+      }
+    } else {
+      fs.writeFileSync(schemaDest, DEFAULT_SCHEMA_FALLBACK, 'utf8');
+    }
+  }
+
+  // .gitattributes — union merge for append-only files
+  const gaPath = path.join(wiki, '.gitattributes');
+  const gaContent = `# Let git auto-resolve concurrent appends. Applies to append-only files.
+log.md merge=union
+index.md merge=union
+`;
+  if (!fs.existsSync(gaPath) || force) {
+    fs.writeFileSync(gaPath, gaContent, 'utf8');
+  }
+
+  // index.md — content catalog
+  const indexPath = path.join(wiki, 'index.md');
+  if (!fs.existsSync(indexPath) || force) {
+    const content = `# Wiki Index
+
+Content catalog for the project wiki. One line per page, grouped by category.
+Updated automatically by \`lsdlc-wiki index-upsert\` on every ingest.
+
+## Entities
+
+<!-- entity pages land here -->
+
+## Concepts
+
+<!-- concept pages land here -->
+
+## Tickets
+
+<!-- ticket synthesis pages land here -->
+
+## Incidents
+
+<!-- incident root-cause pages land here -->
+
+## Queries
+
+<!-- filed-back query answers land here -->
+
+## Sources
+
+<!-- imported external sources land here -->
+`;
+    fs.writeFileSync(indexPath, content, 'utf8');
+  }
+
+  // log.md — chronological append-only
+  const logPath = path.join(wiki, 'log.md');
+  if (!fs.existsSync(logPath) || force) {
+    const content = `# Wiki Log
+
+Chronological activity log. Append-only. One entry per ingest, query-file, lint, or sync operation.
+Entry format: \`## [YYYY-MM-DD HH:MM] <kind> | <title>\`.
+
+---
+
+## [${nowLogPrefix()}] init | wiki initialized
+`;
+    fs.writeFileSync(logPath, content, 'utf8');
+  }
+
+  process.stdout.write(`Wiki initialized at ${wiki}\n`);
+  process.stdout.write('Next: run /wiki ingest <ticket-id> to fill it in, or /wiki qmd-setup for hybrid search.\n');
+}
+
+const DEFAULT_SCHEMA_FALLBACK = `# Wiki Schema
+
+This file is the schema for the project wiki — it tells Claude how to maintain
+this directory. See linear-sdlc's references/wiki-schema-template.md for the
+full template.
+
+## Layout
+
+- entities/   — subsystems, modules, services, key files
+- concepts/   — patterns, conventions, architecture decisions
+- tickets/    — completed Linear ticket synthesis
+- incidents/  — root-caused bugs
+- queries/    — filed-back query answers
+- sources/    — immutable raw inputs (articles, transcripts, assets, legacy)
+- index.md    — content catalog (one line per page)
+- log.md      — chronological append-only log
+
+## Rules
+
+1. Never write secrets, credentials, PII, customer names, or internal URLs.
+2. Cross-reference other wiki pages via standard relative markdown links.
+3. On contradictions between new and old claims, insert a callout — never silently overwrite.
+4. Always run lsdlc-wiki secret-scan before any file write.
+5. Always update index.md via lsdlc-wiki index-upsert after new/changed pages.
+6. Always append to log.md via lsdlc-wiki log-append with a descriptive kind and title.
+`;
+
+// ─── Subcommand: log-append ───────────────────────────────────
+function cmdLogAppend(args) {
+  const kind = args[0];
+  const title = args[1];
+  if (!kind || !title) err('usage: lsdlc-wiki log-append <kind> <title> [--touched f1,f2,...]', 1);
+
+  const wiki = resolveWikiPath();
+  if (!wiki) err('wiki is disabled or not initialized', 2);
+  const logPath = path.join(wiki, 'log.md');
+  ensureDir(wiki);
+
+  let touched = [];
+  const idx = args.indexOf('--touched');
+  if (idx >= 0 && args[idx + 1]) {
+    touched = args[idx + 1].split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  let entry = `\n## [${nowLogPrefix()}] ${kind} | ${title}\n`;
+  if (touched.length) {
+    entry += touched.map(t => `- ${t}`).join('\n') + '\n';
+  }
+
+  fs.appendFileSync(logPath, entry, 'utf8');
+}
+
+// ─── Subcommand: index-upsert ─────────────────────────────────
+// Adds or updates one line in index.md under the category header.
+// Categories are determined from the page path's first segment.
+function categoryForPath(relPath) {
+  const first = relPath.split(path.sep)[0] || '';
+  const map = {
+    entities: 'Entities',
+    concepts: 'Concepts',
+    tickets: 'Tickets',
+    incidents: 'Incidents',
+    queries: 'Queries',
+    sources: 'Sources',
+  };
+  return map[first] || 'Other';
+}
+
+function cmdIndexUpsert(args) {
+  const pagePath = args[0];
+  const category = args[1];
+  const summary = args.slice(2).join(' ');
+  if (!pagePath || !category || !summary) {
+    err('usage: lsdlc-wiki index-upsert <page-path-relative-to-wiki> <category> <summary>', 1);
+  }
+
+  const wiki = resolveWikiPath();
+  if (!wiki) err('wiki is disabled or not initialized', 2);
+  const indexPath = path.join(wiki, 'index.md');
+  if (!fs.existsSync(indexPath)) err('index.md not found. Run lsdlc-wiki init first.', 2);
+
+  let content = fs.readFileSync(indexPath, 'utf8');
+  const lines = content.split('\n');
+
+  // Find category heading. Match case-insensitively.
+  const headingRe = new RegExp(`^##\\s+${category}\\s*$`, 'i');
+  let sectionIdx = lines.findIndex(l => headingRe.test(l));
+  if (sectionIdx < 0) {
+    // Append a new section at the end
+    lines.push('');
+    lines.push(`## ${category}`);
+    lines.push('');
+    sectionIdx = lines.length - 2;
+  }
+
+  // Find the end of the section (next ## heading or EOF)
+  let endIdx = lines.length;
+  for (let i = sectionIdx + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) { endIdx = i; break; }
+  }
+
+  // Remove any existing entry for this page within [sectionIdx+1, endIdx)
+  const entryLine = `- [${pagePath}](${pagePath}) — ${summary}`;
+  const linkNeedle = `(${pagePath})`;
+  const keep = [];
+  for (let i = sectionIdx + 1; i < endIdx; i++) {
+    if (lines[i].includes(linkNeedle)) continue;
+    keep.push(lines[i]);
+  }
+
+  // Re-insert the entry at the end of the kept section, above trailing blank lines
+  while (keep.length && keep[keep.length - 1].trim() === '') keep.pop();
+  keep.push(entryLine);
+  keep.push('');
+
+  const rebuilt = [
+    ...lines.slice(0, sectionIdx + 1),
+    ...keep,
+    ...lines.slice(endIdx),
+  ];
+
+  fs.writeFileSync(indexPath, rebuilt.join('\n'), 'utf8');
+}
+
+// ─── Subcommand: secret-scan ──────────────────────────────────
+// Regex backstop. The LLM's soft priors are the first defense;
+// this is the hard gate called before every wiki write.
+const SECRET_PATTERNS = [
+  // Stripe
+  { name: 'stripe-live', re: /\bsk_live_[A-Za-z0-9]{16,}\b/ },
+  { name: 'stripe-test', re: /\bsk_test_[A-Za-z0-9]{16,}\b/ },
+  { name: 'stripe-publishable-live', re: /\bpk_live_[A-Za-z0-9]{16,}\b/ },
+  // AWS
+  { name: 'aws-access-key', re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: 'aws-secret', re: /aws_secret_access_key\s*=\s*['"]?[A-Za-z0-9/+=]{40}['"]?/i },
+  // GitHub
+  { name: 'github-token', re: /\bgh[pousr]_[A-Za-z0-9]{16,}\b/ },
+  { name: 'github-pat', re: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
+  // Linear
+  { name: 'linear-api-key', re: /\blin_api_[A-Za-z0-9]{16,}\b/ },
+  // Slack
+  { name: 'slack-token', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
+  // Google
+  { name: 'google-api', re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  // OpenAI
+  { name: 'openai-key', re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/ },
+  // Anthropic
+  { name: 'anthropic-key', re: /\bsk-ant-(?:api\d+-)?[A-Za-z0-9_-]{20,}\b/ },
+  // Private keys
+  { name: 'pem-private-key', re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/ },
+  // JWT
+  { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/ },
+  // Generic high-value assignments (last — noisy but necessary)
+  { name: 'password-assignment', re: /\b(?:password|passwd|pwd)\s*[:=]\s*['"][^'"\s]{6,}['"]/i },
+  { name: 'api-key-assignment', re: /\b(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|secret[_-]?key)\s*[:=]\s*['"][A-Za-z0-9_\-./=+]{12,}['"]/i },
+];
+
+function scanForSecrets(text) {
+  const hits = [];
+  for (const { name, re } of SECRET_PATTERNS) {
+    // Reset in case `re` was a /g regex (none are today, but be defensive)
+    const match = text.match(re);
+    if (match) hits.push({ pattern: name, snippet: maskSnippet(match[0]) });
+  }
+  return hits;
+}
+
+function maskSnippet(s) {
+  // Never echo the full secret back to the user — mask all but first 4 chars.
+  if (!s) return '';
+  if (s.length <= 8) return s.slice(0, 2) + '***';
+  return s.slice(0, 4) + '***' + s.slice(-2);
+}
+
+function cmdSecretScan(args) {
+  if (!args.length) err('usage: lsdlc-wiki secret-scan <file> [<file> ...]', 1);
+  const allHits = [];
+  for (const f of args) {
+    let text;
+    try { text = fs.readFileSync(f, 'utf8'); }
+    catch (e) { err(`cannot read ${f}: ${e.message}`, 1); }
+    const hits = scanForSecrets(text);
+    for (const h of hits) allHits.push({ file: f, ...h });
+  }
+  if (allHits.length) {
+    process.stderr.write('secret-scan: matches found — aborting write\n');
+    for (const h of allHits) {
+      process.stderr.write(`  ${h.file}: ${h.pattern} (${h.snippet})\n`);
+    }
+    process.exit(3);
+  }
+  // Silent success — caller proceeds with write.
+}
+
+// ─── Subcommand: lint ─────────────────────────────────────────
+function cmdLint() {
+  const wiki = resolveWikiPath();
+  if (!wiki || !fs.existsSync(wiki)) err('wiki not initialized', 2);
+
+  const pages = walkMarkdown(wiki).filter(p => {
+    const name = path.basename(p);
+    return name !== 'CLAUDE.md' && name !== 'index.md' && name !== 'log.md';
+  });
+  const relPages = pages.map(p => path.relative(wiki, p));
+
+  // 1. Contradictions — grep for the callout
+  const contradictions = [];
+  for (const abs of pages) {
+    const text = readFileOrEmpty(abs);
+    if (text.includes('Contradiction noted')) {
+      contradictions.push(path.relative(wiki, abs));
+    }
+  }
+
+  // 2. Orphans — pages with no inbound link from any other page and not in index
+  const indexContent = readFileOrEmpty(path.join(wiki, 'index.md'));
+  const allText = pages.map(p => readFileOrEmpty(p)).join('\n');
+  const orphans = [];
+  for (const rel of relPages) {
+    const base = path.basename(rel);
+    const inIndex = indexContent.includes(rel) || indexContent.includes(base);
+    const inboundLink = allText.includes(rel) || allText.includes(base);
+    if (!inIndex && !inboundLink) orphans.push(rel);
+  }
+
+  // 3. Stale pages — updated: frontmatter older than 90 days
+  const stale = [];
+  const staleDays = 90;
+  const now = Date.now();
+  for (const abs of pages) {
+    const text = readFileOrEmpty(abs);
+    const m = text.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (!m) continue;
+    const updatedMatch = m[1].match(/^updated:\s*([0-9T:.\-+Z ]+)/mi);
+    if (!updatedMatch) continue;
+    const t = Date.parse(updatedMatch[1]);
+    if (isNaN(t)) continue;
+    const ageDays = (now - t) / (1000 * 60 * 60 * 24);
+    if (ageDays > staleDays) {
+      stale.push({ path: path.relative(wiki, abs), ageDays: Math.round(ageDays) });
+    }
+  }
+
+  // 4. Data gaps — TODO markers
+  const gaps = [];
+  for (const abs of pages) {
+    const text = readFileOrEmpty(abs);
+    if (/\bTODO\b|\bFIXME\b|needs human review/i.test(text)) {
+      gaps.push(path.relative(wiki, abs));
+    }
+  }
+
+  // 5. Broken references — relative links to files that don't exist
+  const broken = [];
+  const linkRe = /\[[^\]]*\]\(([^)]+)\)/g;
+  for (const abs of pages) {
+    const text = readFileOrEmpty(abs);
+    let m;
+    while ((m = linkRe.exec(text)) !== null) {
+      const href = m[1];
+      if (href.startsWith('http://') || href.startsWith('https://')) continue;
+      if (href.startsWith('#')) continue;
+      if (!href.endsWith('.md')) continue;
+      const target = path.resolve(path.dirname(abs), href.split('#')[0]);
+      if (!fs.existsSync(target)) {
+        broken.push({ from: path.relative(wiki, abs), target: href });
+      }
+    }
+  }
+
+  // Output
+  const sections = [
+    ['Contradictions', contradictions.map(p => `- ${p}`)],
+    ['Orphan pages', orphans.map(p => `- ${p}`)],
+    ['Stale pages (>90d)', stale.map(s => `- ${s.path} (${s.ageDays}d)`)],
+    ['Data gaps (TODO/FIXME)', gaps.map(p => `- ${p}`)],
+    ['Broken references', broken.map(b => `- ${b.from} → ${b.target}`)],
+  ];
+
+  const totalIssues = sections.reduce((n, [, rows]) => n + rows.length, 0);
+
+  process.stdout.write('# Wiki lint report\n\n');
+  process.stdout.write(`Pages: ${pages.length} | Issues: ${totalIssues}\n\n`);
+  for (const [title, rows] of sections) {
+    process.stdout.write(`## ${title}\n\n`);
+    if (rows.length === 0) process.stdout.write('(none)\n\n');
+    else process.stdout.write(rows.join('\n') + '\n\n');
+  }
+}
+
+// ─── Subcommand: search ───────────────────────────────────────
+function cmdSearch(args) {
+  const flags = parseFlags(args, { number: ['limit'], default: { limit: 20 } });
+  const query = (flags._[0] || '').trim();
+  if (!query) err('usage: lsdlc-wiki search <query> [--backend auto|grep|qmd] [--limit N]', 1);
+
+  const wiki = resolveWikiPath();
+  if (!wiki || !fs.existsSync(wiki)) err('wiki not initialized', 2);
+
+  let backend = flags.backend || (configGet('wiki_search_backend') || 'auto');
+  if (backend === 'auto') {
+    backend = (which('qmd') && qmdCollectionHealthy()) ? 'qmd' : 'grep';
+  }
+
+  if (backend === 'qmd') {
+    const col = configGet('wiki_qmd_collection') || `linear-sdlc-${slug()}`;
+    const res = spawnSync('qmd', ['query', query, '-c', col, '--json', '--min-score', '0.2'], { encoding: 'utf8' });
+    if (res.status !== 0) {
+      // Fall back gracefully
+      return grepSearch(wiki, query, flags.limit);
+    }
+    process.stdout.write(res.stdout);
+    return;
+  }
+
+  return grepSearch(wiki, query, flags.limit);
+}
+
+function qmdCollectionHealthy() {
+  if (!which('qmd')) return false;
+  const col = configGet('wiki_qmd_collection') || `linear-sdlc-${slug()}`;
+  const res = spawnSync('qmd', ['status', '-c', col], { encoding: 'utf8' });
+  return res.status === 0;
+}
+
+function grepSearch(wiki, query, limit) {
+  // Case-insensitive substring match over .md files. Output is JSON-shaped
+  // like qmd so callers don't branch on backend.
+  const results = [];
+  const needle = query.toLowerCase();
+  const pages = walkMarkdown(wiki);
+  for (const abs of pages) {
+    const text = readFileOrEmpty(abs);
+    const lower = text.toLowerCase();
+    const idx = lower.indexOf(needle);
+    if (idx < 0) continue;
+    // Title-match bonus
+    const title = (text.match(/^#\s+(.+)$/m) || [])[1] || '';
+    const titleMatch = title.toLowerCase().includes(needle) ? 1.0 : 0.0;
+    const score = 0.3 + titleMatch * 0.5 + Math.max(0, 0.2 - idx / 10000);
+    const snippetStart = Math.max(0, idx - 40);
+    const snippet = text.slice(snippetStart, idx + needle.length + 80).replace(/\s+/g, ' ').trim();
+    results.push({
+      path: path.relative(wiki, abs),
+      score,
+      snippet,
+    });
+  }
+  results.sort((a, b) => b.score - a.score);
+  const top = results.slice(0, limit);
+  process.stdout.write(JSON.stringify({ backend: 'grep', count: top.length, results: top }, null, 2) + '\n');
+}
+
+// ─── Subcommand: migrate ──────────────────────────────────────
+function cmdMigrate() {
+  const wiki = resolveWikiPath();
+  if (!wiki) err('wiki is disabled', 2);
+  if (!fs.existsSync(wiki)) err('wiki not initialized. Run lsdlc-wiki init first.', 2);
+
+  const legacy = path.join(stateDir(), 'projects', slug(), 'wiki');
+  if (!fs.existsSync(legacy)) {
+    process.stdout.write('No legacy wiki found at ' + legacy + '\n');
+    return;
+  }
+
+  const dest = path.join(wiki, 'sources', 'legacy');
+  ensureDir(dest);
+
+  let copied = 0;
+  for (const entry of fs.readdirSync(legacy)) {
+    if (entry.startsWith('.')) continue;
+    const src = path.join(legacy, entry);
+    const dst = path.join(dest, entry);
+    if (fs.statSync(src).isFile()) {
+      fs.copyFileSync(src, dst);
+      copied++;
+    }
+  }
+
+  process.stdout.write(`Imported ${copied} legacy files into ${path.relative(wiki, dest)}/\n`);
+  process.stdout.write('Next: run `/wiki ingest --source sources/legacy/<file>` for each one to integrate.\n');
+
+  // Log it
+  runInternal('log-append', ['migrate', `imported ${copied} legacy files`, '--touched', 'sources/legacy/']);
+}
+
+function runInternal(sub, args) {
+  // Re-enter our own dispatcher without exec cost
+  try {
+    const prev = process.argv;
+    process.argv = [process.argv[0], process.argv[1], sub, ...args];
+    dispatch(false);
+    process.argv = prev;
+  } catch (e) {
+    // best-effort
+  }
+}
+
+// ─── Subcommand: ingest-source ────────────────────────────────
+// The LLM does the synthesis pass. This CLI just moves the file into the
+// sources/ tree and emits a directive for the caller (the /wiki skill).
+function cmdIngestSource(args) {
+  const src = args[0];
+  if (!src) err('usage: lsdlc-wiki ingest-source <path>', 1);
+  const wiki = resolveWikiPath();
+  if (!wiki) err('wiki is disabled', 2);
+  if (!fs.existsSync(src)) err(`source not found: ${src}`, 1);
+
+  const base = path.basename(src);
+  // Classify by extension → articles vs transcripts vs assets
+  const ext = path.extname(base).toLowerCase();
+  let subdir;
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext)) subdir = 'sources/assets';
+  else if (/transcript|meeting|call/i.test(base)) subdir = 'sources/transcripts';
+  else subdir = 'sources/articles';
+
+  const destDir = path.join(wiki, subdir);
+  ensureDir(destDir);
+  const dest = path.join(destDir, base);
+  fs.copyFileSync(src, dest);
+
+  const rel = path.join(subdir, base);
+  runInternal('log-append', ['ingest-source', rel, '--touched', rel]);
+
+  process.stdout.write(`Imported ${rel}\n`);
+  process.stdout.write(`DIRECTIVE_TO_CLAUDE: Read ${rel}, synthesize fan-out wiki updates, then run lsdlc-wiki index-upsert + log-append.\n`);
+}
+
+// ─── Subcommand: linear-map ───────────────────────────────────
+// Deterministic UUID v4 derived from sha1(slug + wiki-rel-path).
+// Version/variant bits set per RFC 4122 so Linear accepts the string.
+function deterministicUuid(input) {
+  const h = crypto.createHash('sha1').update(input).digest();
+  const bytes = Buffer.from(h.subarray(0, 16));
+  // Version 4
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  // Variant 10xx
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function cmdLinearMap(args) {
+  const pagePath = args[0];
+  if (!pagePath) err('usage: lsdlc-wiki linear-map <page-path>', 1);
+  const id = deterministicUuid(`${slug()}:${pagePath}`);
+  process.stdout.write(id + '\n');
+}
+
+// ─── Subcommand: sync-linear ──────────────────────────────────
+function cmdSyncLinear(args) {
+  const flags = parseFlags(args, { default: {} });
+  const dryRun = args.includes('--dry-run');
+  const includeSources = args.includes('--include-sources');
+
+  const projectId = configGet('wiki_linear_project_id');
+  if (!projectId) {
+    err('wiki_linear_project_id is unset. Run /wiki linear-setup first.', 2);
+  }
+  const syncOn = configGet('wiki_linear_sync');
+  if (syncOn !== 'true' && !dryRun) {
+    err('wiki_linear_sync is not enabled. Set it to true or use --dry-run.', 2);
+  }
+
+  const wiki = resolveWikiPath();
+  if (!wiki || !fs.existsSync(wiki)) err('wiki not initialized', 2);
+
+  const manifestPath = path.join(wiki, '.linear-sync.json');
+  let manifest = {};
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch {}
+
+  const pages = walkMarkdown(wiki).filter(p => {
+    const rel = path.relative(wiki, p);
+    const name = path.basename(p);
+    if (name === 'CLAUDE.md' || name === 'index.md' || name === 'log.md') return false;
+    if (!includeSources && rel.startsWith('sources' + path.sep)) return false;
+    return true;
+  });
+
+  const actions = [];
+  for (const abs of pages) {
+    const rel = path.relative(wiki, abs);
+    const docId = manifest[rel] || deterministicUuid(`${slug()}:${rel}`);
+    const action = manifest[rel] ? 'update' : 'create';
+    actions.push({ rel, docId, abs, action });
+  }
+
+  // Print summary
+  process.stdout.write(`Linear sync plan: ${actions.filter(a => a.action === 'create').length} create, ${actions.filter(a => a.action === 'update').length} update\n`);
+  for (const a of actions) process.stdout.write(`  ${a.action}: ${a.rel}\n`);
+
+  if (dryRun) return;
+
+  // Secret-scan all pages before any push (fail fast)
+  for (const a of actions) {
+    const hits = scanForSecrets(fs.readFileSync(a.abs, 'utf8'));
+    if (hits.length) {
+      process.stderr.write(`secret-scan hit in ${a.rel} — aborting entire sync\n`);
+      for (const h of hits) process.stderr.write(`  ${h.pattern} (${h.snippet})\n`);
+      process.exit(3);
+    }
+  }
+
+  // Push each page
+  let pushed = 0;
+  for (const a of actions) {
+    const body = fs.readFileSync(a.abs, 'utf8');
+    const banner = `> **Source:** \`.linear-sdlc/wiki/${a.rel}\` — edits made here will be overwritten on the next sync.\n\n`;
+    const title = deriveTitle(body, a.rel);
+    // Write to a temp file so we don't pass large content on argv
+    const tmp = path.join(os.tmpdir(), `lsdlc-wiki-sync-${process.pid}-${pushed}.md`);
+    fs.writeFileSync(tmp, banner + body, 'utf8');
+    try {
+      const result = spawnSync('lsdlc-linear', [
+        'document-upsert',
+        '--project-id', projectId,
+        '--id', a.docId,
+        '--title', title,
+        '--content-file', tmp,
+      ], { encoding: 'utf8' });
+      if (result.status !== 0) {
+        process.stderr.write(`sync-linear: failed on ${a.rel}: ${result.stderr}\n`);
+      } else {
+        manifest[a.rel] = a.docId;
+        pushed++;
+      }
+    } finally {
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  }
+
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  process.stdout.write(`Pushed ${pushed} pages to Linear.\n`);
+}
+
+function deriveTitle(body, rel) {
+  const m = body.match(/^#\s+(.+)$/m);
+  if (m) return m[1].trim();
+  return rel.replace(/\.md$/, '');
+}
+
+// ─── Subcommand: qmd-setup ────────────────────────────────────
+function cmdQmdSetup() {
+  if (!which('qmd')) {
+    process.stdout.write('qmd is not installed.\n');
+    process.stdout.write('Install with:  npm install -g @tobilu/qmd\n');
+    process.exit(4);
+  }
+  const wiki = resolveWikiPath();
+  if (!wiki || !fs.existsSync(wiki)) err('wiki not initialized', 2);
+  const col = configGet('wiki_qmd_collection') || `linear-sdlc-${slug()}`;
+
+  // Register collection (idempotent: qmd handles re-adds gracefully in most versions)
+  const add = spawnSync('qmd', ['collection', 'add', wiki, '--name', col], { encoding: 'utf8', stdio: 'inherit' });
+  if (add.status !== 0) {
+    process.stderr.write('qmd collection add failed; the collection may already exist.\n');
+  }
+  // Initial index + embed
+  spawnSync('qmd', ['update', '-c', col], { stdio: 'inherit' });
+  spawnSync('qmd', ['embed', '-c', col], { stdio: 'inherit' });
+
+  configSet('wiki_search_backend', 'qmd');
+  configSet('wiki_qmd_collection', col);
+  configSet('wiki_qmd_auto_index', 'true');
+  process.stdout.write(`qmd collection '${col}' registered and indexed.\n`);
+}
+
+// ─── Subcommand: qmd-refresh ──────────────────────────────────
+function cmdQmdRefresh(args) {
+  if (!which('qmd')) return;  // silent no-op
+  const col = configGet('wiki_qmd_collection') || `linear-sdlc-${slug()}`;
+  spawnSync('qmd', ['update', '-c', col], { stdio: 'inherit' });
+  if (args.includes('--embed')) {
+    spawnSync('qmd', ['embed', '-c', col], { stdio: 'inherit' });
+  }
+}
+
+// ─── Tiny argv parser (mirrors lsdlc-linear) ─────────────────
+function parseFlags(args, schema) {
+  const out = Object.assign({}, schema.default || {});
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      let key, val;
+      if (eq >= 0) { key = a.slice(2, eq); val = a.slice(eq + 1); }
+      else {
+        key = a.slice(2);
+        const next = args[i + 1];
+        if (next === undefined || next.startsWith('--')) { out[key] = true; continue; }
+        val = next;
+        i++;
+      }
+      if ((schema.number || []).includes(key)) {
+        const n = parseInt(val, 10);
+        if (Number.isNaN(n)) err(`--${key} must be an integer (got "${val}")`, 1);
+        out[key] = n;
+      } else {
+        out[key] = val;
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  out._ = positional;
+  return out;
+}
+
+// ─── Dispatcher ───────────────────────────────────────────────
+function dispatch(exitAfter = true) {
+  const [, , subcmd, ...rest] = process.argv;
+  if (!subcmd || subcmd === '-h' || subcmd === '--help') {
+    process.stdout.write([
+      'Usage: lsdlc-wiki <subcommand> [args]',
+      '',
+      'Subcommands:',
+      '  path                              Resolve and print the effective wiki dir',
+      '  init [--force]                    Scaffold the wiki',
+      '  log-append <kind> <title> [--touched f1,f2,...]',
+      '  index-upsert <page-path> <category> <summary>',
+      '  lint                              Structural checks',
+      '  search <query> [--backend ...] [--limit N]',
+      '  secret-scan <file> [<file> ...]   Exit 3 on hit',
+      '  migrate                           Import legacy home-dir wiki',
+      '  ingest-source <path>              Drop file in sources/, emit LLM directive',
+      '  sync-linear [--dry-run] [--include-sources]',
+      '  linear-map <page-path>            Print deterministic Linear doc UUID',
+      '  qmd-setup                         Register wiki as qmd collection',
+      '  qmd-refresh [--embed]             Reindex qmd collection',
+      '',
+    ].join('\n'));
+    if (exitAfter) process.exit(subcmd ? 0 : 1);
+    return;
+  }
+
+  try {
+    switch (subcmd) {
+      case 'path':          cmdPath(); break;
+      case 'init':          cmdInit(rest); break;
+      case 'log-append':    cmdLogAppend(rest); break;
+      case 'index-upsert':  cmdIndexUpsert(rest); break;
+      case 'lint':          cmdLint(); break;
+      case 'search':        cmdSearch(rest); break;
+      case 'secret-scan':   cmdSecretScan(rest); break;
+      case 'migrate':       cmdMigrate(); break;
+      case 'ingest-source': cmdIngestSource(rest); break;
+      case 'sync-linear':   cmdSyncLinear(rest); break;
+      case 'linear-map':    cmdLinearMap(rest); break;
+      case 'qmd-setup':     cmdQmdSetup(); break;
+      case 'qmd-refresh':   cmdQmdRefresh(rest); break;
+      default:
+        err(`unknown subcommand: ${subcmd}. Run 'lsdlc-wiki --help'.`, 1);
+    }
+  } catch (e) {
+    err(`unexpected: ${e.message || String(e)}`, 2);
+  }
+}
+
+dispatch();

@@ -1,5 +1,85 @@
 # Changelog
 
+## v2.3.0 — 2026-04-09 — LLM Wiki
+
+Implements the [llm_wiki pattern](thoughts/llm_wiki.md) as a first-class feature. Instead of re-deriving knowledge from raw sources on every query (RAG), linear-sdlc maintains a persistent, LLM-authored wiki that lives in the user's repo, follows a three-layer model (raw sources → wiki → schema), and is fed automatically by `/implement` and `/debug` on every successful completion.
+
+### Additions
+
+- **`bin/lsdlc-wiki`** — unified plumbing CLI (pure Node, zero-dep, follows the `bin/lsdlc-linear` conventions). Subcommands: `path`, `init`, `log-append`, `index-upsert`, `lint`, `search`, `secret-scan`, `migrate`, `ingest-source`, `sync-linear`, `linear-map`, `qmd-setup`, `qmd-refresh`. The CLI is pure mechanism — the LLM does the synthesis via the `/wiki` skill and the auto-ingest hooks in `/implement` and `/debug`.
+
+- **`skills/wiki/SKILL.md` (`/wiki`)** — the user-facing entry point. Routes to: `init` (scaffold), `ingest` (fan-out synthesis — 1 source touches 10+ pages), `query` (search + answer + file-back loop), `lint` (structural report), `sync` (semantic merge-conflict resolution), `sync-linear` (one-way push to Linear Project Documents), `linear-setup` (interactive project picker), `ingest-source` (import external files), `migrate` (import legacy home-dir wiki), `qmd-setup` / `qmd-refresh` (optional hybrid search tier). Claude is the author; `lsdlc-wiki` is the plumbing.
+
+- **`references/wiki-schema-template.md`** — the CLAUDE.md template that `/wiki init` copies into `<wiki>/CLAUDE.md`. Contains the three-layer model, directory conventions, page/index/log formats, contradiction-callout spec, fan-out ingest workflow, file-back query loop, lint checks, and privacy rules. Scoped by directory proximity so it never collides with the user's root CLAUDE.md or linear-sdlc's own CLAUDE.md.
+
+- **Storage: repo-first with `wiki_scope` config key.** Under the default `wiki_scope=repo`, the wiki lives at `<user-repo>/.linear-sdlc/wiki/` and is committed via git — naturally shared across teammates, versioned with the code, reviewed through normal PRs. `wiki_scope=private` preserves the legacy `~/.linear-sdlc/projects/<slug>/wiki/` per-user layout for sensitive projects. `wiki_scope=off` disables the wiki entirely.
+
+- **Fresh installs default to `wiki_scope=repo`. Existing users opt-out auto-upgrade.** `./setup` detects pre-existing config and flips unset `wiki_scope` to `repo`, dropping a `~/.linear-sdlc/.wiki-upgrade-pending` marker. The shared preamble prints a one-time notice on the next skill run explaining the change and how to revert (`lsdlc-config set wiki_scope private`). Legacy home-dir wiki content is **never touched** — users migrate on their own via `/wiki migrate`, which copies files into `<wiki>/sources/legacy/` non-destructively.
+
+- **Auto-ingest on `/implement` and `/debug`** (default on via `wiki_auto_ingest=true` and `wiki_auto_incident=true`). `/implement` Step 9 runs a fan-out write after the PR is created: `tickets/<ID>.md` plus updates to affected entity/concept pages, contradiction callouts on disagreeing claims, `index.md` + `log.md` updates, all gated by `lsdlc-wiki secret-scan` (non-zero exit aborts the **entire** ingest). `/debug` Step 6.5 writes `incidents/<slug>.md` after a confirmed fix only (not on hand-back or investigate-further branches). **Nothing is auto-committed** — wiki edits are left in the working tree for the user's review.
+
+- **Fan-out ingest, not single-page writes.** Per llm_wiki.md, a single source should touch 10–15 pages: the primary page (`tickets/VER-42.md` etc.) plus updates to every related entity/concept page, with cross-references expanded. The `/wiki ingest` skill, `/implement` Step 9, and `/debug` Step 6.5 all follow this workflow explicitly.
+
+- **Contradiction callouts** (never silent overwrites). When new claims disagree with existing text on a page, the LLM inserts a `> **⚠ Contradiction noted:**` block instead of overwriting. Contradictions persist until a human resolves them; `lsdlc-wiki lint` surfaces them on every pass; the shared preamble's WIKI info line shows the current count.
+
+- **Single `log.md` with git union merge.** Entry format `## [YYYY-MM-DD HH:MM] <kind> | <title>` per the llm_wiki pattern, plus touched-file list. `/wiki init` creates a `.gitattributes` with `log.md merge=union` and `index.md merge=union` so concurrent appends from teammates merge cleanly without `<<<<<<<` markers. Same union merge handles sorted index additions.
+
+- **Query → file-back loop.** `/wiki query <question>` reads `index.md`, drills into candidate pages, synthesizes an answer with inline relative-markdown citations, and offers to file the answer back as `queries/<slug>.md` via `AskUserQuestion`. On yes: secret-scan, write, `index-upsert`, `log-append query-filed`. Explorations compound into the knowledge base.
+
+- **Raw sources layer (`<wiki>/sources/`).** First-class drop zone for external inputs: `sources/articles/`, `sources/transcripts/`, `sources/assets/`, `sources/legacy/`. `/wiki ingest-source <path>` moves a file into the appropriate subdirectory (MIME-sniffed) and kicks off a fan-out synthesis pass over the new source. Raw files are immutable — the LLM reads them but never modifies.
+
+- **Linear Project Documents as a team-facing mirror** (opt-in via `/wiki linear-setup`). `bin/lsdlc-linear` gains four new subcommands: `list-projects`, `get-project`, `document-upsert` (with caller-supplied UUID for idempotency, content read from a file path to avoid shell escaping and keep the existing `process.env.LINEAR_API_KEY` safety invariant intact), and `document-delete`. `lsdlc-wiki sync-linear` uses these to push each wiki page to a Linear Document under the configured Project. Sync is one-way (git → Linear) to avoid Linear's YJS CRDT, deterministic (UUID derived from `sha1(slug + page-path)`), secret-scanned before every push, and excludes `sources/` by default. Every synced document is prepended with a "Source: <relative path>" banner warning editors their changes will be overwritten. Disabled by default (`wiki_linear_sync=false`); enabling it is an explicit opt-in via `/wiki linear-setup` or direct config.
+
+- **Optional qmd search backend** ([tobi/qmd](https://github.com/tobi/qmd), hybrid BM25 + vector + on-device LLM re-ranking). `lsdlc-wiki search` auto-routes: if `qmd` is on PATH and a `linear-sdlc-<slug>` collection is registered, it execs `qmd query ... -c <collection> --json`; otherwise falls back to grep with title-match and recency boosting. Both backends return the same `{path, score, snippet}` JSON shape so callers never branch. `/wiki qmd-setup` registers the collection, runs initial `qmd update` + `qmd embed`, and flips `wiki_search_backend=qmd`. Ingests follow with a background `qmd update` when `wiki_qmd_auto_index=true`. qmd is never required — it's purely additive, same pattern as the official Linear MCP.
+
+- **`references/preamble.sh` wiki info line.** Every skill invocation prints `WIKI: <N> pages | <M> contradictions | last: <log entry> | linear-sync: on` as part of the standard preamble output, replacing the duplicated wiki display blocks that individual skills carried. The contradiction count grep excludes meta files (CLAUDE.md, index.md, log.md) so the schema template's prose doesn't produce false positives.
+
+- **Hard secret-scan gate.** `lsdlc-wiki secret-scan <file>` regex-checks for: Stripe live/test/publishable keys, AWS access keys and secret assignments, GitHub tokens (`ghp_`, `github_pat_`), Linear API keys, Slack tokens, Google API keys, OpenAI and Anthropic keys, PEM private-key headers, JWTs, and generic `password=`/`api_key=` assignments. Exit code 3 on hit. Masked snippet in the error output (never echoes the full secret). Called before **every** wiki write path — ingest, query-file, sync-linear, manual writes. Non-zero exit aborts the entire in-flight operation.
+
+- **Structural lint with five categories.** `lsdlc-wiki lint` reports contradictions, orphan pages, stale pages (frontmatter `updated:` >90 days old), data gaps (TODO/FIXME/needs-human-review markers), and broken references (dead relative links). Weight ≤5% in `/health`'s composite — informational, not blocking.
+
+### Modified files
+
+- **`references/preamble.sh`** — resolves `_WIKI` via `lsdlc-wiki path`, drops the hardcoded `mkdir -p "$_PROJ/wiki"` (wiki creation is now explicit via `/wiki init`), prints the wiki info line, and shows the one-time upgrade notice when `.wiki-upgrade-pending` is present.
+- **`skills/implement/SKILL.md`** — removes the duplicated per-skill wiki count display (now in the preamble) and adds Step 9.4 auto-ingest with fan-out workflow, contradiction handling, secret-scan gate, and optional Linear auto-sync.
+- **`skills/debug/SKILL.md`** — Step 6.5 auto-writes `incidents/<slug>.md` after a confirmed fix, with the same secret-scan gate and contradiction handling.
+- **`skills/brainstorm/SKILL.md`** — new Step 1.5 prior-art read via `lsdlc-wiki search` before the Linear duplicate search. Read-only.
+- **`skills/health/SKILL.md`** — adds a `Wiki` row to the dashboard (scoring contradictions, orphans, stale, broken refs) with ~5% composite weight. Silent skip when the wiki is not initialized.
+- **`setup`** — new `--wiki-scope repo|private|off` flag. Fresh installs default `wiki_scope=repo`. Existing installs with other config keys trigger the opt-out auto-upgrade path (writes `wiki_scope=repo` and drops the `.wiki-upgrade-pending` marker). Summary line gains a `wiki scope:` row. Skills and bin scripts are auto-symlinked by existing setup logic — no explicit additions needed for `bin/lsdlc-wiki` or `skills/wiki/`.
+- **`bin/lsdlc-wiki-ingest`** / **`bin/lsdlc-wiki-lint`** — converted to deprecation shims. The lint shim forwards to `lsdlc-wiki lint` via `exec`; the old template-based ingest path is retired with a help message pointing at `/wiki ingest`.
+- **`bin/lsdlc-linear`** — adds `list-projects`, `get-project`, `document-upsert`, `document-delete`. All reuse the existing `resolveApiKey()` path and the `process.env.LINEAR_API_KEY` safety invariant (secrets never on argv, never interpolated into shell strings).
+- **`CLAUDE.md`**, **`ETHOS.md`**, **`README.md`** — documentation updates covering the three-layer model, the `wiki_scope` modes, the `/wiki` skill, the Linear sync opt-in, the optional qmd tier, and the "Synthesis Is Curated, Not Automatic" principle.
+
+### Config keys
+
+New in `~/.linear-sdlc/config.json`:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `wiki_scope` | `repo` (fresh) / `repo` (upgrade, one-time notice) | `repo` \| `private` \| `off` |
+| `wiki_path` | unset | Override the resolved wiki dir |
+| `wiki_auto_ingest` | `true` | `/implement` auto-writes on PR creation |
+| `wiki_auto_incident` | `true` | `/debug` auto-writes on confirmed fix |
+| `wiki_secret_scan` | `true` | Run secret regex scan before every write |
+| `wiki_linear_project_id` | unset | Linear Project UUID to sync into |
+| `wiki_linear_sync` | `false` | Master switch for Linear sync (explicit opt-in) |
+| `wiki_linear_auto_sync` | `false` | Follow wiki writes with an automatic `sync-linear` push |
+| `wiki_search_backend` | `auto` | `auto` \| `grep` \| `qmd` |
+| `wiki_qmd_collection` | unset | Override auto-derived collection name (`linear-sdlc-<slug>`) |
+| `wiki_qmd_auto_index` | `true` when qmd present | Background `qmd update` after writes |
+
+### Safety properties
+
+- **Secrets never reach Linear or origin.** Hard regex gate before every wiki write, re-run on every sync-linear push, `wiki_scope=private` escape hatch for sensitive projects.
+- **`LINEAR_API_KEY` stays in `process.env`.** The new `document-upsert` reads content from a file path (not argv) and never interpolates the API key into shell strings. Same invariant as the rest of `lsdlc-linear`.
+- **No auto-commits.** Every wiki write is left in the working tree for `git diff` review. User sovereignty preserved where it matters.
+- **No silent migrations.** Legacy home-dir wiki content stays in place until the user explicitly runs `/wiki migrate`.
+- **Deterministic Linear Document IDs** via `sha1(slug + page-path)` with UUID v4 bits set per RFC 4122, so re-syncs are idempotent (`documentUpdate` not `documentCreate`).
+
+### Verification
+
+26 end-to-end scenarios in the plan file cover: fresh install, opt-out upgrade path, fan-out ingest, contradiction callouts, secret-scan aborting the whole ingest, debug incident path, query file-back loop, external source ingest, log.md union merge, lint across all five categories, health integration, migration, merge conflict resolution, `wiki_scope=off`, Linear sync setup / first push / idempotent update / sources exclusion / secret-scan re-check / disabled-by-default, qmd tier 1/2/MCP missing-tool handling, and forced grep fallback. See `/Users/douglasswm/.claude/plans/vast-petting-kahn.md` for the full plan.
+
 ## v2.2.0 — 2026-04-09 — Autoupdate (port from gstack)
 
 Every skill now nudges the user when a newer linear-sdlc release is on GitHub, with a four-option dialog (Yes / Always / Not now / Never ask again) and a one-command upgrade. The implementation is a close port of gstack's autoupdate feature, adapted to linear-sdlc's shared-preamble architecture.

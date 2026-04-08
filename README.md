@@ -289,32 +289,157 @@ Use `./setup --skip-api-key` to opt out of writing the env file entirely.
 
 ## State directory
 
-All persistent state lives at `~/.linear-sdlc/`:
+Most persistent state lives at `~/.linear-sdlc/` (per-user, per-machine):
 
 ```
 ~/.linear-sdlc/
 ├── env                              # API key (mode 0600), if you used setup's prompt
-├── config.json                      # team ID, skill_prefix, source_dir, update_check, auto_upgrade
+├── config.json                      # team ID, skill_prefix, source_dir, wiki_scope, ...
 ├── last-update-check                # autoupdate cache: "<result> <local> <remote> <ts>"
 ├── update-snoozed                   # escalating "Not now" snooze: "<version> <level> <epoch>"
 ├── just-upgraded-from               # "<old> <new>" marker, shown once after /upgrade
+├── .wiki-upgrade-pending            # one-time notice marker (wiki_scope auto-upgrade)
+├── .wiki-scope-initialized          # setup-remember marker for wiki scope handling
 ├── .last-session-update             # team-mode throttle timestamp (1h window)
 ├── .session-update.lock             # team-mode PID lockfile (auto-clears stale PIDs)
 ├── analytics/
 │   └── session-update.log           # team-mode worker decisions + git output
 └── projects/
     └── {slug}/                      # per-project (slug derived from git remote)
-        ├── learnings.jsonl          # operational notes (append-only, with confidence decay)
+        ├── learnings.jsonl          # PRIVATE operational notes (append-only, confidence decay)
         ├── timeline.jsonl           # skill execution history
         ├── {branch}-reviews.jsonl   # specialist review findings per branch
         ├── health-history.jsonl     # /health score trend
-        ├── wiki/                    # synthesized knowledge pages
-        │   ├── index.md
-        │   └── log.md
+        ├── wiki/                    # (ONLY under wiki_scope=private — legacy mode)
+        │   └── ...
         └── checkpoints/             # /checkpoint session state
 ```
 
-Override the location with `LSDLC_STATE_DIR=/path/to/state`.
+**Wiki storage is different.** Under the default `wiki_scope=repo`, the
+wiki lives in **the user's repo** at `<repo-root>/.linear-sdlc/wiki/` and
+is committed via git so team members share it. Under `wiki_scope=private`
+the wiki stays in `~/.linear-sdlc/projects/<slug>/wiki/` per-user. Under
+`wiki_scope=off` the wiki is disabled entirely. See the [LLM Wiki](#llm-wiki)
+section for the full model.
+
+Override the `~/.linear-sdlc/` location with `LSDLC_STATE_DIR=/path/to/state`.
+
+## LLM Wiki
+
+linear-sdlc ships a **persistent, LLM-maintained wiki** that lives alongside
+your code. It follows the llm_wiki pattern: instead of re-deriving knowledge
+from raw sources on every query (RAG), the wiki is a compounding artifact —
+`/implement` and `/debug` feed it automatically, and a schema file
+(`<wiki>/CLAUDE.md`) teaches Claude how to maintain it.
+
+### Layout
+
+```
+<your-repo>/.linear-sdlc/wiki/
+├── CLAUDE.md       # schema — how Claude maintains this wiki (scoped by proximity)
+├── index.md        # content catalog, grouped by category
+├── log.md          # chronological append-only (git union merge for conflict-free appends)
+├── .gitattributes  # log.md merge=union, index.md merge=union
+├── entities/       # subsystems, modules, services (LLM-authored prose)
+├── concepts/       # patterns, conventions, architecture decisions
+├── tickets/        # synthesis of completed Linear tickets
+├── incidents/      # root-caused bugs from /debug
+├── queries/        # filed-back answers from /wiki query (explorations compound)
+└── sources/        # RAW LAYER — immutable drop zone for external inputs
+    ├── articles/     # articles, PDFs, blog posts
+    ├── transcripts/  # meeting notes, customer calls
+    ├── assets/       # images referenced from wiki pages
+    └── legacy/       # populated by /wiki migrate
+```
+
+### Three layers
+
+1. **Raw sources** (immutable) — code, Linear tickets, private learnings in
+   `~/.linear-sdlc/projects/<slug>/learnings.jsonl`, and files dropped into
+   `<wiki>/sources/`. The LLM reads; never modifies.
+2. **The wiki** (LLM-owned) — entity/concept/ticket/incident/queries pages
+   plus `index.md` and `log.md`. The LLM authors; you review diffs.
+3. **The schema** (co-evolved) — `<wiki>/CLAUDE.md` tells the LLM how to
+   maintain the wiki. Scoped to this subtree by directory proximity so it
+   never collides with your repo's root `CLAUDE.md`.
+
+### The `/wiki` skill
+
+```
+/wiki init                 Scaffold the wiki in the current repo (once)
+/wiki ingest VER-42        Fan-out synthesis of a Linear ticket into wiki pages
+/wiki query "how does auth work"  Search + synthesize + offer to file answer back
+/wiki lint                 Structural report with suggested fixes
+/wiki sync                 Resolve working-tree merge conflicts semantically
+/wiki sync-linear          Push wiki pages to a Linear Project as Documents
+/wiki linear-setup         Interactive: pick a Linear Project, enable sync
+/wiki ingest-source PATH   Import an external file and synthesize it
+/wiki migrate              Import legacy ~/.linear-sdlc home-dir wiki content
+/wiki qmd-setup            Register the wiki as a qmd search collection (optional)
+```
+
+### Auto-ingest on `/implement` and `/debug`
+
+With `wiki_auto_ingest=true` (default), `/implement` writes a
+`tickets/<ID>.md` page plus updates to affected entity/concept pages on
+every successful PR creation. With `wiki_auto_incident=true` (default),
+`/debug` writes an `incidents/<slug>.md` page after a confirmed fix. All
+writes go through a **hard secret-scan gate** (`lsdlc-wiki secret-scan`) and
+are left in the working tree — never auto-committed. You review wiki edits
+in the normal `git diff` before committing.
+
+### Multi-team workflow
+
+The wiki is committed alongside code. Two teammates can each auto-ingest
+tickets the same day — `log.md` and `index.md` merge cleanly via the git
+`merge=union` driver (configured automatically by `/wiki init`). Entity
+page conflicts resolve via `/wiki sync`, which asks Claude to re-synthesize
+conflicting sections from both sides.
+
+### Optional: Linear Project Documents as a team-facing mirror
+
+If your team uses Linear Projects for planning, run `/wiki linear-setup` to
+pick a Project. `/wiki sync-linear` then pushes each wiki page to a Linear
+**Document** under that Project (one-way, git → Linear). PMs and designers
+who don't clone the repo get a read-only view of the wiki inside Linear's
+UI, with Linear's search and notifications working over wiki content. The
+sync is idempotent via caller-supplied UUIDs, secret-scanned before every
+push, and never automatic by default (`wiki_linear_sync=false`).
+
+### Optional: qmd for hybrid search
+
+By default, `lsdlc-wiki search` uses grep (always available). If you want
+BM25 + vector + LLM re-ranking at scale, install [qmd](https://github.com/tobi/qmd):
+
+```bash
+npm install -g @tobilu/qmd
+/wiki qmd-setup
+```
+
+The search path auto-routes to qmd when the collection is registered and
+healthy, and falls back to grep otherwise. For the smoothest integration,
+register qmd as a Claude Code MCP server — Claude then calls `query`,
+`get`, and `multi_get` as native tools:
+
+```bash
+claude mcp add qmd -- qmd mcp
+```
+
+### Privacy
+
+The wiki is visible to everyone with read access to the repo. Never write
+secrets, credentials, PII, customer names, or internal URLs. Defense in
+depth:
+
+- `lsdlc-wiki secret-scan` is a **hard gate** before every write (catches
+  Stripe keys, AWS, GitHub tokens, JWTs, private PEMs, and common
+  `api_key=`/`password=` assignments — see `bin/lsdlc-wiki`).
+- The wiki `CLAUDE.md` schema tells the LLM to avoid writing sensitive
+  material in the first place.
+- Wiki edits are never auto-committed — you review the diff before pushing.
+- `wiki_scope=private` is a first-class escape hatch for projects too
+  sensitive to synthesize in a shared location at all.
+- Linear sync is disabled by default; enabling it is an explicit opt-in.
 
 ## Bin scripts
 
@@ -325,8 +450,9 @@ Override the location with `LSDLC_STATE_DIR=/path/to/state`.
 | `lsdlc-timeline-log` | Append skill events to `timeline.jsonl` |
 | `lsdlc-learnings-log` | Append operational learnings to `learnings.jsonl` |
 | `lsdlc-learnings-search` | Search learnings with confidence decay and dedup |
-| `lsdlc-wiki-ingest` | Synthesize learnings into wiki pages (3+ per topic) |
-| `lsdlc-wiki-lint` | Check wiki for stale or inconsistent content |
+| `lsdlc-wiki` | Unified wiki plumbing CLI: `path`, `init`, `log-append`, `index-upsert`, `lint`, `search`, `secret-scan`, `migrate`, `ingest-source`, `sync-linear`, `linear-map`, `qmd-setup`, `qmd-refresh`. The LLM does the synthesis; this CLI handles mechanism |
+| `lsdlc-wiki-ingest` | **Deprecated shim** — forwards to `/wiki ingest`. Removed in a future release |
+| `lsdlc-wiki-lint` | **Deprecated shim** — forwards to `lsdlc-wiki lint` |
 | `lsdlc-update-check` | Silent release-check helper called by the shared preamble (see [Autoupdate](#autoupdate)) |
 | `lsdlc-session-update` | Team-mode background auto-updater — forks on Claude Code session start, respects throttle/lock/config gates |
 | `lsdlc-settings-hook` | Idempotent add/remove of entries in `~/.claude/settings.json` hooks; preserves foreign hooks on remove |

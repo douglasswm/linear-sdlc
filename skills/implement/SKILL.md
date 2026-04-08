@@ -40,7 +40,8 @@ if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
 fi
 SKILL_NAME=implement . "$LINEAR_SDLC_ROOT/references/preamble.sh"
 
-# Learnings + wiki + last session (skill-specific display)
+# Learnings + last session (skill-specific display)
+# (Wiki info is rendered by the shared preamble.)
 _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
@@ -49,9 +50,6 @@ if [ -f "$_LEARN_FILE" ]; then
 else
   echo "LEARNINGS: 0"
 fi
-
-_WIKI_PAGES=$(find "$_PROJ/wiki" -name "*.md" ! -name "index.md" ! -name "log.md" 2>/dev/null | wc -l | tr -d ' ')
-echo "WIKI: ${_WIKI_PAGES:-0} pages"
 
 if [ -f "$_PROJ/timeline.jsonl" ]; then
   _LAST=$(grep "\"branch\":\"${_BRANCH}\"" "$_PROJ/timeline.jsonl" 2>/dev/null | grep '"event":"completed"' | tail -1)
@@ -307,7 +305,61 @@ Respect the user's choice — this is a nudge, not a gate.
 
 3. **Log any learnings** discovered during implementation
 
-4. **Report status** — cite the verification output verbatim, don't restate from memory:
+4. **Auto-ingest the ticket into the wiki** (if `wiki_auto_ingest` is enabled, default true).
+
+   Check first:
+   ```bash
+   WIKI_DIR="$(lsdlc-wiki path 2>/dev/null)"
+   AUTO_INGEST="$(lsdlc-config get wiki_auto_ingest 2>/dev/null || echo true)"
+   ```
+
+   If `$WIKI_DIR` is non-empty AND the directory exists AND `$AUTO_INGEST` is `true`:
+
+   Run the **fan-out ingest** workflow from the `/wiki` skill and the wiki's
+   own `CLAUDE.md` schema. In summary:
+
+   a. Read `$WIKI_DIR/index.md` to find entity/concept pages related to the
+      files in `git diff "$BASE_BRANCH"...HEAD`.
+   b. Read the related existing pages.
+   c. Draft `tickets/<TICKET-ID>.md` with: summary, affected files (diff
+      paths), design notes, links to touched entity/concept pages using
+      relative markdown links.
+   d. Draft updates to each related entity/concept page. This is the
+      fan-out — expect to touch 3–10 pages. Cross-link them back to the
+      ticket page.
+   e. If new claims contradict existing text on any page, insert the
+      contradiction callout from the wiki `CLAUDE.md` — never silently
+      overwrite.
+   f. **Secret-scan every draft** before writing:
+      ```bash
+      for draft in "$WIKI_DIR/tickets/$TICKET_ID.md" <other drafts>; do
+        lsdlc-wiki secret-scan "$draft" || { echo "ABORT: secret-scan hit"; break; }
+      done
+      ```
+      If any draft fails the scan, **abort the entire ingest**. Do NOT
+      write any file. Print the failure and move on.
+   g. Write all drafts.
+   h. For each new/changed page, run
+      `lsdlc-wiki index-upsert <rel-path> <Category> <one-line-summary>`.
+   i. Append one consolidated log entry:
+      ```bash
+      lsdlc-wiki log-append ingest "$TICKET_ID: <ticket title>" --touched "<comma-separated rel paths>"
+      ```
+   j. Print a summary line:
+      `WIKI: wrote tickets/$TICKET_ID.md + updated <N> entity/concept pages (secret-scan: ok)`
+   k. If `wiki_qmd_auto_index=true` and `qmd` is installed, reindex in the
+      background: `lsdlc-wiki qmd-refresh &`
+   l. If `wiki_linear_auto_sync=true`, follow up with
+      `lsdlc-wiki sync-linear` to mirror the new pages to Linear.
+
+   **Never auto-commit.** Leave every wiki edit in the working tree for
+   the user to review with `git diff .linear-sdlc/wiki/` and include in
+   their next commit when ready.
+
+   If `$AUTO_INGEST` is `false`, print a candidate list instead:
+   `WIKI: candidates for /wiki ingest $TICKET_ID — tickets/$TICKET_ID.md, <list related pages>`
+
+5. **Report status** — cite the verification output verbatim, don't restate from memory:
    ```
    STATUS: DONE
    EVIDENCE:

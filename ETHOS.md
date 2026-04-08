@@ -8,9 +8,13 @@ Every code change traces back to a Linear ticket. No orphan branches, no undocum
 
 Code doesn't ship without automated specialist review. Testing, security, performance, and code quality specialists examine every diff. Critical findings block the PR. This catches what humans miss under deadline pressure.
 
-## Knowledge Accumulates Across Sessions
+## Knowledge Accumulates Across Sessions and Across Teammates
 
-Every session leaves the project smarter. Learnings are logged, patterns are recognized, pitfalls are remembered. The wiki synthesizes raw observations into actionable knowledge. Future sessions start with context, not from scratch.
+Every session leaves the project smarter. Raw observations accumulate privately per user in `learnings.jsonl`. Synthesized knowledge accumulates **across the team** in the project wiki at `<repo>/.linear-sdlc/wiki/`, committed via git so teammates share it. The wiki follows the llm_wiki three-layer pattern: raw sources (code, tickets, learnings, external files) → LLM-authored wiki pages → schema (`CLAUDE.md`) that teaches Claude how to maintain them. `/implement` and `/debug` auto-ingest on completion; explorations filed back via `/wiki query` compound the knowledge base over time. Future sessions — and future teammates — start with context, not from scratch.
+
+## Synthesis Is Curated, Not Automatic
+
+Private learnings never auto-flow into the shared wiki. The LLM synthesizes entity/concept/ticket/incident pages primarily from code and ticket context, and every draft runs through a hard `lsdlc-wiki secret-scan` gate before writing. Wiki edits are left in the working tree — never auto-committed — so every synthesis has a `git diff` review window before reaching origin. If a project is too sensitive to synthesize in a shared location at all, `wiki_scope=private` is a first-class escape hatch that keeps the wiki in the user's home directory.
 
 ## User Sovereignty
 

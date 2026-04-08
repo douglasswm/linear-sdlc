@@ -116,6 +116,17 @@ npx knip 2>&1 | tail -10
 ```
 Parse: number of dead code findings.
 
+### Wiki health
+```bash
+WIKI_DIR="$(lsdlc-wiki path 2>/dev/null)"
+if [ -n "$WIKI_DIR" ] && [ -d "$WIKI_DIR" ]; then
+  lsdlc-wiki lint 2>&1
+fi
+```
+Parse the "Issues: N" line from the first header. Also count contradictions,
+orphans, stale pages, and broken references separately. Skip silently if
+the wiki is not initialized (no `WIKI:` row in the dashboard).
+
 ## Step 3: Compute Scores
 
 Score each tool 0-10:
@@ -148,12 +159,22 @@ Score each tool 0-10:
 - 2: 15-30 findings
 - 0: >30 findings
 
+### Wiki score (informational — low weight)
+- 10: Zero issues, wiki exists and has ≥5 pages
+- 8: <5 total issues (orphans, stale, broken refs) and zero contradictions
+- 5: <15 issues, zero unresolved contradictions
+- 2: >15 issues OR ≥1 unresolved contradiction
+- 0: Wiki has ≥3 unresolved contradictions or is effectively broken
+- (skipped if wiki is not initialized — does not contribute to composite)
+
 ### Weighted composite
 ```
-composite = (test * 0.30) + (lint * 0.25) + (typecheck * 0.25) + (deadcode * 0.20)
+composite = (test * 0.30) + (lint * 0.23) + (typecheck * 0.23) + (deadcode * 0.19) + (wiki * 0.05)
 ```
 
-If a tool is missing, redistribute its weight equally to the remaining tools.
+If a tool is missing (including the wiki), redistribute its weight
+proportionally across the remaining tools. Wiki is intentionally low
+weight — it's informational, not a blocking quality signal.
 
 ## Step 4: Display Dashboard
 
@@ -168,6 +189,7 @@ If a tool is missing, redistribute its weight equally to the remaining tools.
 | Lint | ruff | 9/10 | 0 errors, 4 warnings |
 | Types | mypy | 7/10 | 8 type errors |
 | Dead Code | vulture | 10/10 | 0 findings |
+| Wiki | lsdlc-wiki | 9/10 | 42 pages, 1 orphan, 0 contradictions |
 
 ### Composite Score: 8.4/10 ████████░░
 

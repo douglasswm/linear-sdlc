@@ -25,6 +25,7 @@ SKILL_PREFIX_FLAG=0
 SKIP_API_KEY=0
 SKIP_MCP_PROMPT=0
 TEAM_MODE_FLAG=""  # "" | "on" | "off"
+WIKI_SCOPE_FLAG=""  # "" | "repo" | "private" | "off"
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix)         SKILL_PREFIX=1; SKILL_PREFIX_FLAG=1; shift ;;
@@ -33,6 +34,8 @@ while [ $# -gt 0 ]; do
     --skip-mcp-prompt) SKIP_MCP_PROMPT=1; shift ;;
     --team)           TEAM_MODE_FLAG="on"; shift ;;
     --no-team)        TEAM_MODE_FLAG="off"; shift ;;
+    --wiki-scope)     WIKI_SCOPE_FLAG="${2:-}"; shift 2 ;;
+    --wiki-scope=*)   WIKI_SCOPE_FLAG="${1#*=}"; shift ;;
     -q|--quiet)       QUIET=1; shift ;;
     -h|--help)
       cat <<'EOF'
@@ -49,6 +52,10 @@ Flags:
                     (throttled to once per hour, never blocks startup).
   --no-team         Disable team mode: unset auto_upgrade + team_mode and remove
                     the SessionStart hook.
+  --wiki-scope S    Set wiki_scope to 'repo', 'private', or 'off'. Default for
+                    fresh installs is 'repo'. Existing installs are auto-upgraded
+                    to 'repo' unless they already have wiki_scope set, and a
+                    one-time notice is shown on the next skill run.
   -q, --quiet       Suppress informational logs
   -h, --help        Show this message
 EOF
@@ -57,6 +64,14 @@ EOF
     *) warn "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+# Validate --wiki-scope value if provided
+if [ -n "$WIKI_SCOPE_FLAG" ]; then
+  case "$WIKI_SCOPE_FLAG" in
+    repo|private|off) ;;
+    *) warn "Error: --wiki-scope must be one of: repo, private, off"; exit 1 ;;
+  esac
+fi
 
 # ─── Prereq checks ─────────────────────────────────────────────
 if ! command -v git >/dev/null 2>&1; then
@@ -133,6 +148,49 @@ config_set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)
 
 # ─── Persist source_dir for the preamble's resolver ────────────
 config_set source_dir "$SOURCE_DIR"
+
+# ─── Wiki scope: fresh install + opt-out auto-upgrade ──────────
+# Rules:
+#   - --wiki-scope X    → set wiki_scope=X unconditionally
+#   - unset in config AND config.json is brand new → wiki_scope=repo (fresh install)
+#   - unset in config AND config.json already exists → wiki_scope=repo + drop
+#     .wiki-upgrade-pending marker so the preamble shows a one-time notice on
+#     the next skill run. This is the opt-out auto-upgrade path.
+#   - already set → leave alone
+CONFIG_FILE="$STATE_DIR/config.json"
+EXISTING_WIKI_SCOPE="$(config_get wiki_scope)"
+if [ -n "$WIKI_SCOPE_FLAG" ]; then
+  config_set wiki_scope "$WIKI_SCOPE_FLAG"
+  log "  wiki_scope=$WIKI_SCOPE_FLAG (explicit)"
+  # If the user is flipping to repo mode, clear any pending-upgrade marker
+  # since they've now made a conscious choice.
+  [ "$WIKI_SCOPE_FLAG" = "repo" ] && rm -f "$STATE_DIR/.wiki-upgrade-pending"
+elif [ -z "$EXISTING_WIKI_SCOPE" ]; then
+  # Was the config file present before this setup run? We check by looking at
+  # whether it has any non-wiki keys — at this point in setup, we've written
+  # `skill_prefix` and `source_dir`, so a "brand new" install means those are
+  # the only keys present, which we can't easily tell. Simpler heuristic: use
+  # a marker file that indicates this install has seen wiki setup before.
+  WIKI_MARKER="$STATE_DIR/.wiki-scope-initialized"
+  if [ -f "$WIKI_MARKER" ]; then
+    # Previous setup run already initialized wiki_scope but the user unset it
+    # manually. Respect that — leave it unset (preamble will fall back to
+    # private behavior).
+    log "  wiki_scope unset (previously initialized, respecting manual unset)"
+  elif [ -f "$CONFIG_FILE" ] && [ "$(node -e "const c=JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf8')); process.stdout.write(Object.keys(c).filter(k => k !== 'source_dir' && k !== 'skill_prefix' && k !== 'wiki_scope').length.toString())" 2>/dev/null || echo 0)" -gt 0 ]; then
+    # Existing install (other config keys present) — opt-out auto-upgrade.
+    config_set wiki_scope repo
+    touch "$WIKI_MARKER"
+    touch "$STATE_DIR/.wiki-upgrade-pending"
+    log "  wiki_scope=repo (opt-out auto-upgrade — one-time notice on next skill run)"
+    log "  to revert: lsdlc-config set wiki_scope private"
+  else
+    # Fresh install.
+    config_set wiki_scope repo
+    touch "$WIKI_MARKER"
+    log "  wiki_scope=repo (fresh install default)"
+  fi
+fi
 
 # ─── Helper: link skill directories into ~/.claude/skills/ ─────
 # Mirrors gstack's approach: real top-level dirs containing a SKILL.md
@@ -518,6 +576,9 @@ if [ "$_TM_SETTING" = "true" ]; then
   TEAM_MODE_DISPLAY="on (SessionStart hook registered; './setup --no-team' to disable)"
 fi
 
+WIKI_SCOPE_DISPLAY="$(config_get wiki_scope)"
+[ -z "$WIKI_SCOPE_DISPLAY" ] && WIKI_SCOPE_DISPLAY="(unset → legacy private fallback)"
+
 cat <<EOF
 
 linear-sdlc ready.
@@ -530,7 +591,9 @@ linear-sdlc ready.
   official MCP: $MCP_DISPLAY
   update check: $UPDATE_CHECK_DISPLAY
   team mode:    $TEAM_MODE_DISPLAY
+  wiki scope:   $WIKI_SCOPE_DISPLAY
 
 Try it:  /brainstorm rate limiting
+Wiki:    cd <your repo> && /wiki init  (once per repo — scaffolds the wiki)
 Update:  cd $SOURCE_DIR && git pull && ./setup   (or run /upgrade from Claude)
 EOF

@@ -1,104 +1,24 @@
 #!/usr/bin/env bash
-# lsdlc-wiki-ingest — synthesize learnings into wiki pages
-# Usage: lsdlc-wiki-ingest
+# lsdlc-wiki-ingest — deprecated shim.
 #
-# Groups learnings by key prefix. When 3+ learnings share a topic prefix,
-# creates or updates a wiki page. Updates wiki/index.md and wiki/log.md.
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-eval "$("$SCRIPT_DIR/lsdlc-slug" 2>/dev/null)"
-LSDLC_HOME="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
-PROJ="$LSDLC_HOME/projects/$SLUG"
-WIKI="$PROJ/wiki"
-LEARNINGS="$PROJ/learnings.jsonl"
+# The old template-based ingest (group learnings.jsonl by `type` and emit
+# flat pages) has been replaced by the LLM-authored fan-out ingest pattern
+# implemented in skills/wiki/SKILL.md and triggered automatically by
+# /implement and /debug.
+#
+# Will be removed in a future release.
+cat >&2 <<'EOF'
+lsdlc-wiki-ingest is deprecated.
 
-if [ ! -f "$LEARNINGS" ]; then
-  echo "No learnings file found at $LEARNINGS"
-  exit 0
-fi
+The new wiki lives at <repo>/.linear-sdlc/wiki/ (per wiki_scope=repo) and is
+maintained by the LLM via the /wiki skill. The old template-based ingest
+path has been retired.
 
-mkdir -p "$WIKI"
+To get started:
+  /wiki init            — scaffold the wiki in this repo
+  /wiki ingest VER-42   — fan-out synthesis for a ticket
+  /wiki query "..."     — ask a question against the wiki
 
-# Group learnings by type, find topics with 3+ entries
-node -e "
-const fs = require('fs');
-const lines = fs.readFileSync('$LEARNINGS', 'utf8').trim().split('\n').filter(Boolean);
-
-const byType = {};
-for (const line of lines) {
-  try {
-    const e = JSON.parse(line);
-    if (!e.type || !e.key) continue;
-    if (!byType[e.type]) byType[e.type] = [];
-    byType[e.type].push(e);
-  } catch {}
-}
-
-// Find types with 3+ entries (candidates for wiki pages)
-const candidates = [];
-for (const [type, entries] of Object.entries(byType)) {
-  if (entries.length >= 3) {
-    candidates.push({ type, count: entries.length, entries });
-  }
-}
-
-if (candidates.length === 0) {
-  console.log('No topics with 3+ learnings yet. Keep learning!');
-  process.exit(0);
-}
-
-// For each candidate, create/update a wiki page
-const indexEntries = [];
-const logEntries = [];
-const now = new Date().toISOString();
-
-for (const { type, count, entries } of candidates) {
-  const filename = type + '.md';
-  const filepath = '$WIKI/' + filename;
-
-  // Dedup entries by key (latest wins)
-  const seen = new Map();
-  for (const e of entries) {
-    const existing = seen.get(e.key);
-    if (!existing || new Date(e.ts) > new Date(existing.ts)) {
-      seen.set(e.key, e);
-    }
-  }
-  const deduped = Array.from(seen.values());
-
-  // Generate wiki page content
-  let content = '# ' + type.charAt(0).toUpperCase() + type.slice(1) + '\\n\\n';
-  content += 'Auto-generated from ' + deduped.length + ' learnings. Last updated: ' + now.split('T')[0] + '\\n\\n';
-
-  // Sort by confidence desc
-  deduped.sort((a, b) => (b.confidence || 5) - (a.confidence || 5));
-
-  for (const e of deduped) {
-    content += '## ' + e.key + '\\n';
-    content += '- **Insight:** ' + e.insight + '\\n';
-    content += '- **Confidence:** ' + (e.confidence || 5) + '/10 (' + (e.source || 'unknown') + ')\\n';
-    content += '- **Skill:** ' + (e.skill || 'unknown') + '\\n';
-    if (e.files && e.files.length) content += '- **Files:** ' + e.files.join(', ') + '\\n';
-    content += '- **Observed:** ' + (e.ts || 'unknown').split('T')[0] + '\\n';
-    content += '\\n';
-  }
-
-  fs.writeFileSync(filepath, content);
-  console.log('Updated: ' + filename + ' (' + deduped.length + ' entries)');
-
-  indexEntries.push('- [' + type.charAt(0).toUpperCase() + type.slice(1) + '](' + filename + ') — ' + deduped.length + ' learnings');
-  logEntries.push(now + ' — Updated ' + filename + ' with ' + deduped.length + ' entries');
-}
-
-// Update index.md
-let indexContent = '# Wiki Index\\n\\n';
-indexContent += 'Knowledge synthesized from project learnings.\\n\\n';
-indexContent += indexEntries.join('\\n') + '\\n';
-fs.writeFileSync('$WIKI/index.md', indexContent);
-
-// Append to log.md
-const logLine = logEntries.join('\\n') + '\\n';
-fs.appendFileSync('$WIKI/log.md', logLine);
-
-console.log('\\nWiki updated: ' + candidates.length + ' pages, index refreshed.');
-" 2>/dev/null
+Or let /implement and /debug auto-ingest on completion (default behavior).
+EOF
+exit 0

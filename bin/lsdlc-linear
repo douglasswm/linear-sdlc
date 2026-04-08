@@ -16,6 +16,12 @@
 //                             [--labels l1,l2] [--parent VER-40]
 //   lsdlc-linear add-relation <ID> <relation> <other-ID>           # blocks | blockedBy
 //
+//   lsdlc-linear list-projects   [--team KEY|UUID] [--limit N]
+//   lsdlc-linear get-project     <project-uuid>
+//   lsdlc-linear document-upsert --project-id <uuid> --id <doc-uuid>
+//                                --title <title> --content-file <path>
+//   lsdlc-linear document-delete <doc-uuid>
+//
 // --team accepts either the short team key (e.g., "VER") or the team UUID
 // (e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). Auto-detected by format.
 //
@@ -482,6 +488,173 @@ async function cmdAddRelation(args) {
   printJson(result.issueRelationCreate);
 }
 
+// ─── Subcommand: list-projects ────────────────────────────────
+// Lists Projects visible to the caller. Optional --team filters to that team
+// via team.projects edge; without --team, we walk teams the viewer is on.
+async function cmdListProjects(args) {
+  const flags = parseFlags(args, {
+    number: ['limit'],
+    default: { limit: 50 },
+  });
+
+  if (flags.team) {
+    // Resolve team to UUID if a key was passed
+    let teamId;
+    if (isUuid(flags.team)) {
+      teamId = flags.team;
+    } else {
+      const t = await linear(
+        `query Teams($key: String!) {
+          teams(filter: { key: { eq: $key } }) { nodes { id key } }
+        }`,
+        { key: flags.team }
+      );
+      if (!t.teams.nodes.length) err(`team not found: ${flags.team}`, 1);
+      teamId = t.teams.nodes[0].id;
+    }
+
+    const gql = `
+      query TeamProjects($teamId: String!, $first: Int!) {
+        team(id: $teamId) {
+          projects(first: $first, includeSubTeams: true) {
+            nodes { id name slugId url description state startDate targetDate }
+          }
+        }
+      }
+    `;
+    const data = await linear(gql, { teamId, first: flags.limit });
+    const nodes = (data.team && data.team.projects && data.team.projects.nodes) || [];
+    printJson({ count: nodes.length, projects: nodes });
+    return;
+  }
+
+  // No team filter — list projects across the viewer's teams.
+  const gql = `
+    query ViewerProjects($first: Int!) {
+      viewer {
+        teams(first: 50) {
+          nodes {
+            id key
+            projects(first: $first) {
+              nodes { id name slugId url description state startDate targetDate }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await linear(gql, { first: flags.limit });
+  const seen = new Set();
+  const projects = [];
+  for (const team of data.viewer.teams.nodes) {
+    for (const p of team.projects.nodes) {
+      if (seen.has(p.id)) continue;
+      seen.add(p.id);
+      projects.push(p);
+    }
+  }
+  printJson({ count: projects.length, projects });
+}
+
+// ─── Subcommand: get-project ──────────────────────────────────
+async function cmdGetProject(args) {
+  const id = args[0];
+  if (!id) err('usage: lsdlc-linear get-project <project-uuid>', 1);
+
+  const gql = `
+    query GetProject($id: String!) {
+      project(id: $id) {
+        id name slugId url description content state startDate targetDate
+        teams(first: 50) { nodes { id key name } }
+        documents(first: 100) {
+          nodes { id title slugId url createdAt updatedAt }
+        }
+      }
+    }
+  `;
+  const data = await linear(gql, { id });
+  if (!data.project) err(`project not found: ${id}`, 1);
+  printJson(data.project);
+}
+
+// ─── Subcommand: document-upsert ──────────────────────────────
+// Caller-supplied UUID for idempotency. Creates if missing, updates if
+// present. Content read from --content-file to avoid shell escaping issues
+// with large markdown bodies (and to keep secrets off argv, though Linear
+// wiki content is not a secrets channel).
+async function cmdDocumentUpsert(args) {
+  const flags = parseFlags(args, { default: {} });
+  if (!flags['project-id']) err('--project-id is required', 1);
+  if (!flags.id) err('--id is required (caller-supplied UUID v4)', 1);
+  if (!flags.title) err('--title is required', 1);
+  if (!flags['content-file']) err('--content-file is required (path to markdown body)', 1);
+
+  if (!isUuid(flags.id)) err('--id must be a UUID v4', 1);
+  if (!isUuid(flags['project-id'])) err('--project-id must be a UUID', 1);
+
+  let content;
+  try { content = fs.readFileSync(flags['content-file'], 'utf8'); }
+  catch (e) { err(`cannot read content file: ${e.message}`, 1); }
+
+  // Check whether the document already exists so we can pick create vs update.
+  const existing = await linear(
+    `query DocExists($id: String!) { document(id: $id) { id title } }`,
+    { id: flags.id }
+  );
+
+  if (existing.document && existing.document.id) {
+    // Update path
+    const update = await linear(
+      `mutation DocUpdate($id: String!, $input: DocumentUpdateInput!) {
+        documentUpdate(id: $id, input: $input) {
+          success
+          document { id title url updatedAt }
+        }
+      }`,
+      {
+        id: flags.id,
+        input: { title: flags.title, content },
+      }
+    );
+    printJson({ action: 'update', ...update.documentUpdate });
+    return;
+  }
+
+  // Create path
+  const create = await linear(
+    `mutation DocCreate($input: DocumentCreateInput!) {
+      documentCreate(input: $input) {
+        success
+        document { id title url createdAt }
+      }
+    }`,
+    {
+      input: {
+        id: flags.id,
+        projectId: flags['project-id'],
+        title: flags.title,
+        content,
+      },
+    }
+  );
+  printJson({ action: 'create', ...create.documentCreate });
+}
+
+// ─── Subcommand: document-delete ──────────────────────────────
+async function cmdDocumentDelete(args) {
+  const id = args[0];
+  if (!id) err('usage: lsdlc-linear document-delete <doc-uuid>', 1);
+  if (!isUuid(id)) err('document id must be a UUID', 1);
+
+  const result = await linear(
+    `mutation DocDelete($id: String!) {
+      documentDelete(id: $id) { success }
+    }`,
+    { id }
+  );
+  printJson(result.documentDelete);
+}
+
 // ─── Dispatcher ───────────────────────────────────────────────
 async function main() {
   const [, , subcmd, ...rest] = process.argv;
@@ -500,6 +673,12 @@ async function main() {
         '               [--labels l1,l2] [--parent VER-40]',
         '  add-relation <ID> <blocks|blockedBy> <other-ID>',
         '',
+        'Project / document sync (used by /wiki sync-linear):',
+        '  list-projects   [--team KEY|UUID] [--limit N]',
+        '  get-project     <project-uuid>',
+        '  document-upsert --project-id UUID --id UUID --title "..." --content-file PATH',
+        '  document-delete <doc-uuid>',
+        '',
         '--team accepts either the short team key (e.g., "VER") or the team UUID',
         '(e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). Auto-detected by format.',
         '',
@@ -512,13 +691,17 @@ async function main() {
 
   try {
     switch (subcmd) {
-      case 'whoami':        await cmdWhoami(); break;
-      case 'search-issues': await cmdSearchIssues(rest); break;
-      case 'list-assigned': await cmdListAssigned(rest); break;
-      case 'get-issue':     await cmdGetIssue(rest); break;
-      case 'set-status':    await cmdSetStatus(rest); break;
-      case 'create-issue':  await cmdCreateIssue(rest); break;
-      case 'add-relation':  await cmdAddRelation(rest); break;
+      case 'whoami':          await cmdWhoami(); break;
+      case 'search-issues':   await cmdSearchIssues(rest); break;
+      case 'list-assigned':   await cmdListAssigned(rest); break;
+      case 'get-issue':       await cmdGetIssue(rest); break;
+      case 'set-status':      await cmdSetStatus(rest); break;
+      case 'create-issue':    await cmdCreateIssue(rest); break;
+      case 'add-relation':    await cmdAddRelation(rest); break;
+      case 'list-projects':   await cmdListProjects(rest); break;
+      case 'get-project':     await cmdGetProject(rest); break;
+      case 'document-upsert': await cmdDocumentUpsert(rest); break;
+      case 'document-delete': await cmdDocumentDelete(rest); break;
       default:
         err(`unknown subcommand: ${subcmd}. Run 'lsdlc-linear --help'.`, 1);
     }

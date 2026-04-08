@@ -14,29 +14,35 @@ linear-sdlc/
 │   ├── lsdlc-timeline-log             # append skill events to timeline.jsonl
 │   ├── lsdlc-learnings-log            # append learnings to learnings.jsonl
 │   ├── lsdlc-learnings-search         # query learnings with confidence decay
-│   ├── lsdlc-wiki-ingest              # synthesize learnings into wiki pages
-│   ├── lsdlc-wiki-lint                # check wiki freshness
+│   ├── lsdlc-wiki                     # LLM wiki plumbing CLI (init, log-append, index-upsert,
+│   │                                  #   lint, search, secret-scan, migrate, ingest-source,
+│   │                                  #   sync-linear, linear-map, qmd-setup, qmd-refresh)
+│   ├── lsdlc-wiki-ingest              # deprecated shim → /wiki ingest
+│   ├── lsdlc-wiki-lint                # deprecated shim → lsdlc-wiki lint
 │   ├── lsdlc-update-check             # silent release-check helper called by the shared preamble
 │   ├── lsdlc-session-update           # team-mode background worker (SessionStart hook)
 │   ├── lsdlc-settings-hook            # idempotent add/remove of SessionStart hook in ~/.claude/settings.json
-│   └── lsdlc-linear                   # Linear GraphQL helper (Node, zero deps)
+│   └── lsdlc-linear                   # Linear GraphQL helper (Node, zero deps). Includes
+│                                      #   document-upsert for one-way wiki → Linear sync.
 ├── skills/
-│   ├── brainstorm/SKILL.md            # /brainstorm — feature planning
+│   ├── brainstorm/SKILL.md            # /brainstorm — feature planning (reads wiki prior art)
 │   ├── create-tickets/SKILL.md        # /create-tickets — spec → Linear issues
 │   ├── next/SKILL.md                  # /next — pick next ticket
 │   ├── implement/
-│   │   ├── SKILL.md                   # /implement — full ticket lifecycle
+│   │   ├── SKILL.md                   # /implement — full ticket lifecycle + auto wiki ingest
 │   │   └── specialists/               # checklists consumed by parallel sub-agents
 │   │       ├── testing.md
 │   │       ├── security.md
 │   │       ├── performance.md
 │   │       └── code-quality.md
-│   ├── debug/SKILL.md                 # /debug — bug investigation
+│   ├── debug/SKILL.md                 # /debug — bug investigation + auto incident write
+│   ├── wiki/SKILL.md                  # /wiki — init/ingest/query/lint/sync/sync-linear/...
 │   ├── checkpoint/SKILL.md            # /checkpoint — save/resume state
-│   ├── health/SKILL.md                # /health — code quality dashboard
+│   ├── health/SKILL.md                # /health — code quality dashboard (+ wiki row)
 │   └── upgrade/SKILL.md               # /upgrade — autoupdate dialog + git upgrade
 ├── references/
-│   ├── preamble.md                    # shared bash block + LINEAR_SDLC_ROOT resolver
+│   ├── preamble.sh                    # shared bash preamble + _WIKI resolution
+│   ├── wiki-schema-template.md        # CLAUDE.md template scaffolded into <wiki>/CLAUDE.md
 │   ├── ask-user-format.md             # AskUserQuestion template
 │   ├── completion-status.md           # STATUS protocol
 │   └── verification-gate.md           # evidence-first claim pattern
@@ -99,21 +105,49 @@ The skills do not branch on whether the official Linear MCP server is installed.
 ```
 ~/.linear-sdlc/
 ├── env                                # LINEAR_API_KEY (mode 0600), if you used setup's prompt
-├── config.json                        # team id, prefs, source_dir, update_check, auto_upgrade
+├── config.json                        # team id, prefs, source_dir, wiki_scope, wiki_linear_*, ...
 ├── last-update-check                  # update-check cache: "<result> <local> <remote> <ts>"
 ├── update-snoozed                     # "<version> <level> <epoch>" when the user picks "Not now"
 ├── just-upgraded-from                 # "<old> <new>" marker, shown once after a /upgrade
+├── .wiki-upgrade-pending              # one-time notice marker (preamble shows + deletes)
+├── .wiki-scope-initialized            # setup-remember marker for wiki_scope handling
 ├── .last-session-update               # team-mode throttle timestamp (epoch seconds, 1h window)
 ├── .session-update.lock               # team-mode PID lockfile (auto-cleanup of stale PIDs)
 ├── analytics/session-update.log       # team-mode worker log (decisions + fetch/reset/setup output)
 └── projects/<slug>/                   # slug derived from git remote
-    ├── learnings.jsonl                # append-only operational notes (with confidence decay)
+    ├── learnings.jsonl                # PRIVATE operational notes (append-only, confidence decay)
     ├── timeline.jsonl                 # skill execution log
     ├── <branch>-reviews.jsonl         # specialist findings per branch
     ├── health-history.jsonl           # /health score trend
-    ├── wiki/                          # synthesized knowledge pages
+    ├── wiki/                          # ONLY under wiki_scope=private (legacy layout)
     └── checkpoints/                   # /checkpoint session state
 ```
+
+**The wiki lives in the user's repo by default** — not in `~/.linear-sdlc/`.
+Under `wiki_scope=repo` (the fresh-install default), it's at
+`<user-repo-root>/.linear-sdlc/wiki/`, committed via git so teammates share
+it. Under `wiki_scope=private` it falls back to the legacy
+`~/.linear-sdlc/projects/<slug>/wiki/` per-user layout. Under
+`wiki_scope=off` it's disabled entirely.
+
+### Three-layer wiki model
+
+Per `thoughts/llm_wiki.md`:
+
+1. **Raw sources** (immutable): code in the user's repo + Linear tickets
+   (read via `lsdlc-linear`) + private `learnings.jsonl` + files dropped
+   in `<wiki>/sources/`.
+2. **The wiki** (LLM-owned): `entities/`, `concepts/`, `tickets/`,
+   `incidents/`, `queries/` plus `index.md` and `log.md`. Authored by
+   Claude, reviewed by the user in `git diff`.
+3. **The schema** (co-evolved): `<wiki>/CLAUDE.md`. Scoped by directory
+   proximity so Claude Code only reads it when editing files inside the
+   wiki subtree. Scaffolded from `references/wiki-schema-template.md` by
+   `/wiki init`.
+
+`/implement` and `/debug` auto-ingest on successful completion (the
+"fan-out" pattern — one source touches 10+ pages). Every write goes
+through a hard `lsdlc-wiki secret-scan` gate. Nothing auto-commits.
 
 Override the state dir for tests: `LSDLC_STATE_DIR=/tmp/test-state ./setup`. All bin scripts and the skill preamble respect this.
 
@@ -155,10 +189,22 @@ grep -rn 'lsdlc-update-check' skills/
   Should return zero hits. If anything turns up, that's a v1 leak.
 - **Verify no skill has drifted away from the shared preamble:**
   ```bash
-  grep -rln 'preamble.sh' skills/   # expect exactly 8 files (one per skill)
+  grep -rln 'preamble.sh' skills/   # expect exactly 9 files (one per skill, incl. /wiki)
   grep -rn  'LINEAR_API_KEY' skills/  # expect zero hits — only the shared preamble loads it
   ```
   If a skill has its own env-sourcing block, fold it back into `references/preamble.sh` — we explicitly don't want the RCE-relevant code duplicated.
+- **Wiki path regressions:**
+  ```bash
+  # No skill should construct $_PROJ/wiki — the wiki path is resolved by
+  # the shared preamble via `lsdlc-wiki path` and exported as $_WIKI.
+  grep -rn '\$_PROJ/wiki' skills/ references/ bin/
+  ```
+  Should return zero hits (except in `bin/lsdlc-wiki` and `bin/lsdlc-wiki-ingest` which are the plumbing that owns that path during `migrate`).
+- **Secrets never on argv:**
+  ```bash
+  grep -rn 'LINEAR_API_KEY' bin/ references/
+  ```
+  Should return hits ONLY in `references/preamble.sh` (the safe loader) and `bin/lsdlc-linear` (reads `process.env.LINEAR_API_KEY`). Any new code path must use `process.env` — never interpolate the key into shell strings or argv.
 
 ## Conventions
 
