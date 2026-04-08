@@ -67,13 +67,36 @@ function stateDir() {
   return process.env.LSDLC_STATE_DIR || path.join(os.homedir(), '.linear-sdlc');
 }
 
+// ─── In-process config reader ─────────────────────────────────
+// Reads ~/.linear-sdlc/config.json directly instead of shelling out to
+// `lsdlc-config get` on every call. A single lsdlc-wiki invocation
+// previously spawned 3-5 subprocesses just for config reads; now it's
+// one stat + one file read, cached for the lifetime of the process.
+//
+// Writes still go through `lsdlc-config set` so the schema validation
+// and atomic write logic in one place is preserved.
+let _configCache = null;
+function readConfig() {
+  if (_configCache !== null) return _configCache;
+  const p = path.join(stateDir(), 'config.json');
+  try {
+    _configCache = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    _configCache = {};
+  }
+  return _configCache;
+}
+
 function configGet(key) {
-  const v = run('lsdlc-config', ['get', key]);
-  return v || '';
+  const c = readConfig();
+  const v = c[key];
+  return v === undefined || v === null ? '' : String(v);
 }
 
 function configSet(key, value) {
   run('lsdlc-config', ['set', key, value]);
+  // Invalidate the in-memory cache so subsequent reads see the new value.
+  _configCache = null;
 }
 
 function slug() {
@@ -117,10 +140,6 @@ function walkMarkdown(dir) {
     }
   }
   return out;
-}
-
-function nowIso() {
-  return new Date().toISOString();
 }
 
 function nowLogPrefix() {
@@ -177,6 +196,53 @@ function cmdPath() {
   const p = resolveWikiPath();
   if (p) process.stdout.write(p + '\n');
   // Empty output = wiki disabled or unresolvable; consumers check for empty.
+}
+
+// ─── Subcommand: info ─────────────────────────────────────────
+// One-shot status line for the shared preamble. Produces BOTH the
+// resolved wiki path and the human-readable display line in a single
+// node invocation, collapsing what used to be ~10 subprocess spawns
+// per skill startup (lsdlc-wiki path + find + find-exec-grep + grep
+// + tail + sed + lsdlc-config get wiki_linear_sync) into one.
+//
+// Output format (stdout, always two lines):
+//   PATH=<absolute wiki dir, or empty if off/unresolved>
+//   LINE=<full "WIKI: ..." display line, or empty>
+//
+// Callers (preamble.sh): capture the whole output, parse key=value.
+function cmdInfo() {
+  const wikiPath = resolveWikiPath();
+  let line = '';
+
+  if (wikiPath && fs.existsSync(wikiPath)) {
+    // Count pages, contradictions, read last log entry — all in a
+    // single filesystem walk so we don't spawn find/grep subprocesses.
+    const pages = walkMarkdown(wikiPath).filter(p => {
+      const n = path.basename(p);
+      return n !== 'CLAUDE.md' && n !== 'index.md' && n !== 'log.md';
+    });
+    let contradictions = 0;
+    for (const p of pages) {
+      if (readFileOrEmpty(p).includes('Contradiction noted')) contradictions++;
+    }
+    const logText = readFileOrEmpty(path.join(wikiPath, 'log.md'));
+    let lastLog = '';
+    const logMatches = logText.match(/^## \[.*$/gm);
+    if (logMatches && logMatches.length) {
+      lastLog = logMatches[logMatches.length - 1].replace(/^## /, '');
+    }
+
+    line = `WIKI: ${pages.length} pages`;
+    if (contradictions > 0) line += ` | ${contradictions} contradictions`;
+    if (lastLog) line += ` | last: ${lastLog}`;
+    if (configGet('wiki_linear_sync') === 'true') line += ' | linear-sync: on';
+  } else if (wikiPath) {
+    line = 'WIKI: not initialized — run /wiki init to scaffold';
+  }
+  // else: wiki disabled (wiki_scope=off or no git root in repo mode) — silent
+
+  process.stdout.write(`PATH=${wikiPath || ''}\n`);
+  process.stdout.write(`LINE=${line}\n`);
 }
 
 // ─── Subcommand: init ─────────────────────────────────────────
@@ -344,19 +410,7 @@ function cmdLogAppend(args) {
 
 // ─── Subcommand: index-upsert ─────────────────────────────────
 // Adds or updates one line in index.md under the category header.
-// Categories are determined from the page path's first segment.
-function categoryForPath(relPath) {
-  const first = relPath.split(path.sep)[0] || '';
-  const map = {
-    entities: 'Entities',
-    concepts: 'Concepts',
-    tickets: 'Tickets',
-    incidents: 'Incidents',
-    queries: 'Queries',
-    sources: 'Sources',
-  };
-  return map[first] || 'Other';
-}
+// Category is passed explicitly by the caller (the /wiki skill).
 
 // Escape regex metacharacters so an arbitrary string can be embedded
 // inside a RegExp literal without breaking the pattern. Used by
@@ -921,6 +975,7 @@ function dispatch(exitAfter = true) {
       '',
       'Subcommands:',
       '  path                              Resolve and print the effective wiki dir',
+      '  info                              One-shot preamble status (PATH=/LINE=)',
       '  init [--force]                    Scaffold the wiki',
       '  log-append <kind> <title> [--touched f1,f2,...]',
       '  index-upsert <page-path> <category> <summary>',
@@ -942,6 +997,7 @@ function dispatch(exitAfter = true) {
   try {
     switch (subcmd) {
       case 'path':          cmdPath(); break;
+      case 'info':          cmdInfo(); break;
       case 'init':          cmdInit(rest); break;
       case 'log-append':    cmdLogAppend(rest); break;
       case 'index-upsert':  cmdIndexUpsert(rest); break;

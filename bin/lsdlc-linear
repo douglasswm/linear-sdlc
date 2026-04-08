@@ -557,23 +557,50 @@ async function cmdListProjects(args) {
 }
 
 // ─── Subcommand: get-project ──────────────────────────────────
+// Fetches the project + the full list of its Documents. Documents are
+// paginated because a long-lived project can accumulate more than the
+// 100-node default page size — /wiki sync-linear relies on this to see
+// existing docs before deciding create vs update.
 async function cmdGetProject(args) {
   const id = args[0];
   if (!id) err('usage: lsdlc-linear get-project <project-uuid>', 1);
 
-  const gql = `
+  const firstQuery = `
     query GetProject($id: String!) {
       project(id: $id) {
         id name slugId url description content state startDate targetDate
         teams(first: 50) { nodes { id key name } }
         documents(first: 100) {
+          pageInfo { hasNextPage endCursor }
           nodes { id title slugId url createdAt updatedAt }
         }
       }
     }
   `;
-  const data = await linear(gql, { id });
+  const data = await linear(firstQuery, { id });
   if (!data.project) err(`project not found: ${id}`, 1);
+
+  // Paginate remaining documents if the project has more than 100.
+  const allDocs = [...data.project.documents.nodes];
+  let pageInfo = data.project.documents.pageInfo;
+  const pageQuery = `
+    query ProjectDocs($id: String!, $after: String!) {
+      project(id: $id) {
+        documents(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { id title slugId url createdAt updatedAt }
+        }
+      }
+    }
+  `;
+  while (pageInfo && pageInfo.hasNextPage) {
+    const more = await linear(pageQuery, { id, after: pageInfo.endCursor });
+    if (!more.project) break;
+    allDocs.push(...more.project.documents.nodes);
+    pageInfo = more.project.documents.pageInfo;
+  }
+
+  data.project.documents = { nodes: allDocs };
   printJson(data.project);
 }
 

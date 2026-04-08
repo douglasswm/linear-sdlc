@@ -97,28 +97,19 @@ echo "BRANCH: $_BRANCH"
 echo "PROJECT: $_SLUG"
 
 # ─── Wiki resolution ───────────────────────────────────────────
-# _WIKI is the effective wiki dir for the current project. Resolution is
-# owned by `lsdlc-wiki path` and respects wiki_scope / wiki_path in config.
-# Empty output means wiki is off, not initialized, or not resolvable from
-# the current directory.
-_WIKI="$(lsdlc-wiki path 2>/dev/null || true)"
+# Single-shot status via `lsdlc-wiki info`. Outputs two lines:
+#   PATH=<absolute wiki dir, or empty>
+#   LINE=<"WIKI: ..." display line, or empty>
+# One subprocess (node) instead of the ~10 we used to spawn
+# (find/grep/tail/sed/lsdlc-config). The JSON config is read in-process
+# and cached inside lsdlc-wiki, so wiki_linear_sync doesn't need its
+# own lsdlc-config call.
+_WIKI_INFO=$(lsdlc-wiki info 2>/dev/null || true)
+_WIKI=$(printf '%s\n' "$_WIKI_INFO" | sed -n 's/^PATH=//p')
+_WIKI_LINE=$(printf '%s\n' "$_WIKI_INFO" | sed -n 's/^LINE=//p')
 export _WIKI
-if [ -n "$_WIKI" ] && [ -d "$_WIKI" ]; then
-  _WIKI_PAGES=$(find "$_WIKI" -name '*.md' ! -name CLAUDE.md ! -name index.md ! -name log.md 2>/dev/null | wc -l | tr -d ' ')
-  # Contradiction count: only real pages, never the schema template or meta files.
-  _WIKI_CONTRADICTIONS=$(find "$_WIKI" -name '*.md' ! -name CLAUDE.md ! -name index.md ! -name log.md -exec grep -l 'Contradiction noted' {} \; 2>/dev/null | wc -l | tr -d ' ')
-  _WIKI_LAST=$(grep '^## \[' "$_WIKI/log.md" 2>/dev/null | tail -1 | sed 's/^## //')
-  _WIKI_LINE="WIKI: $_WIKI_PAGES pages"
-  [ "${_WIKI_CONTRADICTIONS:-0}" != "0" ] && _WIKI_LINE="$_WIKI_LINE | $_WIKI_CONTRADICTIONS contradictions"
-  [ -n "$_WIKI_LAST" ] && _WIKI_LINE="$_WIKI_LINE | last: $_WIKI_LAST"
-  if [ "$(lsdlc-config get wiki_linear_sync 2>/dev/null)" = "true" ]; then
-    _WIKI_LINE="$_WIKI_LINE | linear-sync: on"
-  fi
-  echo "$_WIKI_LINE"
-  unset _WIKI_PAGES _WIKI_CONTRADICTIONS _WIKI_LAST _WIKI_LINE
-elif [ -n "$_WIKI" ]; then
-  echo "WIKI: not initialized — run /wiki init to scaffold"
-fi
+[ -n "$_WIKI_LINE" ] && echo "$_WIKI_LINE"
+unset _WIKI_INFO _WIKI_LINE
 
 # ─── One-time upgrade notice ───────────────────────────────────
 # `./setup` drops this marker when it flips an existing install to
