@@ -17,7 +17,7 @@ A complete SDLC workflow for teams using Linear + Claude Code. Ticket-driven dev
 
 Open Claude Code and paste the prompt below verbatim. Claude runs the clone + setup for you, then writes a short `linear-sdlc` section into your `~/.claude/CLAUDE.md` so future sessions know the skills exist.
 
-> Install linear-sdlc: run **`git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup --skip-api-key --skip-mcp-prompt`** then add a "linear-sdlc" section to `~/.claude/CLAUDE.md` that lists the available skills: /brainstorm, /create-tickets, /next, /implement, /debug, /checkpoint, /health, /upgrade, and notes that each loads project context (learnings, wiki, timeline) from `~/.linear-sdlc/projects/<slug>/`. Then tell me to run `cd ~/.claude/skills/linear-sdlc && ./setup` once in a terminal to enter my Linear API key (from https://linear.app/settings/api) and team ID. Finally, ask me if I also want to install Linear's official HTTP MCP server for ad-hoc Linear queries (`claude mcp add --transport http linear https://mcp.linear.app/mcp`).
+> Install linear-sdlc: run **`git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup --skip-api-key --skip-mcp-prompt`** then add a "linear-sdlc" section to `~/.claude/CLAUDE.md` that lists the available skills: /brainstorm, /create-tickets, /next, /implement, /debug, /wiki, /checkpoint, /health, /upgrade, and notes that each loads project context (learnings, wiki, timeline) from `~/.linear-sdlc/projects/<slug>/` and `<repo>/.linear-sdlc/wiki/`. Then tell me to run `cd ~/.claude/skills/linear-sdlc && ./setup` once in a terminal to enter my Linear API key (from https://linear.app/settings/api) and team ID. Finally, ask me if I also want to install Linear's official HTTP MCP server for ad-hoc Linear queries (`claude mcp add --transport http linear https://mcp.linear.app/mcp`).
 
 This runs the non-interactive parts of setup (skill symlinks, bin linking, directory creation) inside Claude Code. The secrets-handling step — API key + team ID — is left to you, in a real terminal, so your credentials never flow through the chat history.
 
@@ -155,6 +155,8 @@ Claude: [loads full ticket via lsdlc-linear get-issue VER-103 — title,
         Re-running security specialist... clean.
         [gh pr create with rich body referencing VER-103]
         PR #142 opened. VER-103 → In Review.
+        WIKI: wrote tickets/VER-103.md + updated entities/rate-limiter.md
+              and concepts/token-bucket.md (secret-scan: ok)
 
 You:    /debug  the new rate-limit integration test fails under load
 
@@ -168,13 +170,26 @@ Claude: [reproduces: 10rps for 30s, flake rate 8%]
         buckets; TTL set-once pattern races on concurrent INCR.
         Minimal fix: SETNX the TTL on bucket creation instead of after.
         [applies fix, reruns test 20x — 0 failures]
+        WIKI: wrote incidents/rate-limit-ttl-race.md, cross-linked to
+              entities/rate-limiter.md (secret-scan: ok)
+
+You:    /wiki query "how does our token bucket refill work"
+Claude: [reads index.md → drills into concepts/token-bucket.md +
+         entities/rate-limiter.md + the fresh incident page]
+        Token bucket refills via redis INCR + SETNX on creation. The
+        SETNX guard avoids the TTL race documented in
+        [rate-limit-ttl-race](incidents/rate-limit-ttl-race.md).
+        Save this answer as queries/how-token-bucket-refill-works.md?
+You:    Yes.
+Claude: Filed. Future /wiki query on this topic hits the cached answer.
 
 You:    /health
-Claude: [detects: pytest, ruff, mypy, vulture]
-        TEST: pytest  151 passed
-        LINT: ruff    clean
-        TYPE: mypy    clean
-        DEAD: vulture 3 unused helpers (nits)
+Claude: [detects: pytest, ruff, mypy, vulture, lsdlc-wiki]
+        TEST: pytest    151 passed
+        LINT: ruff      clean
+        TYPE: mypy      clean
+        DEAD: vulture   3 unused helpers (nits)
+        WIKI: lsdlc-wiki  42 pages, 0 orphans, 0 contradictions
         Score: 8.7 / 10  (+0.3 from last run 6 days ago)
         [logs trend to health-history.jsonl]
 
@@ -184,15 +199,15 @@ Claude: Captured branch, ticket, PR link, 2 open follow-up notes.
         Resume later with: /checkpoint resume
 ```
 
-You said "rate limiting." The skills said "which conflict are we solving, what's already in Linear, which ticket should block which, which specialist will catch the IP-bucket bound you just forgot, and what did we actually ship." Seven commands, one ticket thread, no orphan branches.
+You said "rate limiting." The skills said "which conflict are we solving, what's already in Linear, which ticket should block which, which specialist will catch the IP-bucket bound you just forgot, what did we actually ship, and what did we learn that the next teammate needs to know." Eight commands, one ticket thread, no orphan branches — and the wiki is a few pages richer than it was this morning, committed on the same branch as the code it describes.
 
 ## The sprint
 
 linear-sdlc is a **process**, not a bag of tools. The skills run in the order a Linear ticket lifecycle runs:
 
-**Plan → Ticket → Pick → Build → Review → Reflect**
+**Plan → Ticket → Pick → Build → Review → Reflect → Remember**
 
-Each skill hands off to the next. `/brainstorm` writes a spec that `/create-tickets` reads. `/create-tickets` creates Linear issues that `/next` ranks. `/next` picks a ticket that `/implement` drives to PR. `/implement` runs parallel specialist reviewers and records findings in `<branch>-reviews.jsonl`. `/debug` uses that same per-branch state when a bug shows up mid-implementation. `/checkpoint` freezes the whole thread so you can walk away and pick it up on a different machine. `/health` keeps a score-over-time that surfaces when quality is drifting. Nothing falls through the cracks because every step knows what came before it — the `~/.linear-sdlc/projects/<slug>/` state directory is the thread.
+Each skill hands off to the next. `/brainstorm` writes a spec that `/create-tickets` reads, after reading the wiki for prior art. `/create-tickets` creates Linear issues that `/next` ranks. `/next` picks a ticket that `/implement` drives to PR. `/implement` runs parallel specialist reviewers and records findings in `<branch>-reviews.jsonl`, then auto-ingests the shipped work into the wiki (ticket synthesis page + fan-out updates to affected entity/concept pages). `/debug` uses that same per-branch state when a bug shows up mid-implementation, and auto-writes an `incidents/<slug>.md` page on a confirmed fix. `/checkpoint` freezes the whole thread so you can walk away and pick it up on a different machine. `/health` keeps a score-over-time that surfaces when quality is drifting, and includes a Wiki row so structural problems (contradictions, orphans, stale pages) are part of the same dashboard. `/wiki` is the explicit entry point for ingestion, querying, and lint — most of the time it runs in the background as part of `/implement` and `/debug`, but you invoke it directly to ask the wiki questions or ingest an external source. Nothing falls through the cracks because every step knows what came before it — the `~/.linear-sdlc/projects/<slug>/` state directory is the thread, and `<repo>/.linear-sdlc/wiki/` is the shared memory your teammates pull via git.
 
 | Skill | Your specialist | What they do |
 |---|---|---|
@@ -202,7 +217,8 @@ Each skill hands off to the next. `/brainstorm` writes a spec that `/create-tick
 | `/implement` | **Staff Engineer** | Full ticket lifecycle, end to end. Loads the ticket + relevant learnings, pre-flight checks the working tree, sets Linear status to **In Progress**, creates the branch, codes with you, then runs **specialist self-review** in parallel sub-agents (testing / security / performance / code-quality). Critical findings block the PR. Opens the PR via `gh` with a body that references the ticket. Sets Linear status to **In Review**. |
 | `/debug` | **Debugger** | Phase-1 diagnostic discipline: reproduce → identify component boundaries → instrument at the boundary → observe → hypothesize root cause → propose the minimal fix. Evidence before hypothesis. Soft rule, not iron law — User Sovereignty still applies, you can override at any point. |
 | `/checkpoint` | **Session Memory** | Save and resume working state across Claude Code sessions. Captures git branch, current ticket, completed + remaining work, PR link, open notes. Writes to `~/.linear-sdlc/projects/<slug>/checkpoints/` as plain markdown — you can read them without any tooling. `/checkpoint resume` loads the most recent one and re-grounds the conversation. |
-| `/health` | **Quality Lead** | Auto-detects your project's quality tools (pytest / jest / vitest, eslint / biome / ruff, tsc / mypy / pyright, vulture / knip), runs each, and computes a weighted composite score (tests 30%, lint 25%, types 25%, dead code 20%). Logs the score to `health-history.jsonl` so you can see the trend across sprints. Flags regressions relative to the last run. |
+| `/health` | **Quality Lead** | Auto-detects your project's quality tools (pytest / jest / vitest, eslint / biome / ruff, tsc / mypy / pyright, vulture / knip), runs each, and computes a weighted composite score (tests 30%, lint 23%, types 23%, dead code 19%, wiki 5%). Logs the score to `health-history.jsonl` so you can see the trend across sprints. Flags regressions relative to the last run. |
+| `/wiki` | **Knowledge Librarian** | Maintains the project's LLM Wiki — a persistent, LLM-authored knowledge base at `<repo>/.linear-sdlc/wiki/` that follows the three-layer llm_wiki pattern (raw sources → wiki → schema). Subcommands: `init` (scaffold once per repo), `ingest` (fan-out synthesis of a ticket/incident/source), `query` (search + answer + file back as `queries/<slug>.md`), `lint` (contradictions, orphans, stale pages, broken refs, data gaps), `sync` (resolve working-tree conflicts semantically), `sync-linear` (one-way push wiki pages → Linear Project Documents), `linear-setup` (interactive Linear Project picker), `ingest-source` (import external file), `migrate` (legacy home-dir wiki), `qmd-setup` / `qmd-refresh` (optional hybrid BM25 + vector search backend). `/implement` and `/debug` auto-call `ingest` on successful completion; every write passes a hard secret-scan gate before any file lands. See [LLM Wiki](#llm-wiki). |
 | `/upgrade` | **Release Manager** | Dispatched automatically when the shared preamble detects a new linear-sdlc release on GitHub (or invokable directly). Presents a Yes / Always / Not now / Never dialog, runs `git fetch && git reset --hard origin/main && ./setup` on a clean working tree, and prints the new CHANGELOG entry. Refuses to clobber uncommitted local edits to the linear-sdlc checkout. See [Autoupdate](#autoupdate). |
 
 Every skill logs its execution to `timeline.jsonl` so the next invocation of `/next`, `/implement`, or `/checkpoint` can surface *"what did I last do on this branch?"* without asking you. That's why the table of contents for any Linear ticket ends up matching your actual work history — the thread is the ticket, and the thread is the state directory.
@@ -470,6 +486,7 @@ Each skill is a single `SKILL.md` file with YAML frontmatter declaring which Cla
 | `/create-tickets` | Sonnet | Medium | Structured judgment over spec decomposition |
 | `/implement` | Sonnet | Medium | Most tickets are small; heavy reasoning happens inside the parallel specialist sub-agents |
 | `/debug` | Sonnet | Medium | Diagnostic reasoning needs structure, not raw creativity |
+| `/wiki` | Sonnet | Medium | LLM-authored prose for entity/concept pages + fan-out synthesis across 3-10 related pages per ingest |
 | `/health` | Sonnet | Medium | Tool detection + composite scoring — structured, not creative |
 | `/checkpoint` | Sonnet | Low | Mechanical state dump/restore |
 | `/upgrade` | Sonnet | Medium | Mostly mechanical (git fetch + reset + setup), but needs judgment on the snooze/opt-out dialog and refuses to clobber uncommitted edits |
@@ -491,14 +508,23 @@ If you've also installed Linear's official MCP server (recommended for ad-hoc qu
 
 Before PR creation, `/implement` dispatches parallel sub-agents (via the `Agent` tool) that independently review the `git diff` against checklists in `skills/implement/specialists/`. Each specialist returns structured findings classified as **Critical** (must fix), **Warning** (discuss), or **Nit** (skip unless you want to address). Findings are deduplicated by file + line.
 
-### Knowledge base
+### Knowledge base — three layers
 
-Two layers:
+Per the [llm_wiki pattern](thoughts/llm_wiki.md), linear-sdlc's knowledge layer has three distinct surfaces:
 
-- **Learnings (JSONL)** — raw operational notes appended during skill execution. Each entry has a key, type, confidence score, and source (observed/inferred/documented). Confidence decays over time for observed/inferred entries (-1 point per 30 days).
-- **Wiki pages (Markdown)** — synthesized knowledge created when 3+ learnings accumulate on a topic. Run `lsdlc-wiki-ingest` to generate wiki pages from learnings; `lsdlc-wiki-lint` to check for stale or inconsistent content.
+1. **Learnings (JSONL, private per-user).** Raw operational notes appended by skills to `~/.linear-sdlc/projects/<slug>/learnings.jsonl`. Each entry has a key, type, confidence score, and source (observed / inferred / documented). Confidence decays -1 point per 30 days for observed/inferred entries. **Never auto-flow into the shared wiki** — they stay on the user's machine and inform LLM-curated synthesis, nothing more.
 
-Every skill loads relevant learnings at startup via the preamble, so context accumulates across sessions.
+2. **The wiki (Markdown, LLM-owned, shared via git).** The persistent knowledge base at `<repo>/.linear-sdlc/wiki/` — committed alongside code so teammates share it via normal git. Subdirectories for `entities/`, `concepts/`, `tickets/`, `incidents/`, `queries/`, and a read-only `sources/` drop zone for external inputs (articles, transcripts, PDFs). `index.md` catalogs every page; `log.md` is a chronological append-only record with `.gitattributes` `merge=union` so concurrent teammate appends merge cleanly. The LLM writes, you review `git diff` before committing.
+
+3. **The schema (Markdown, co-evolved).** `<repo>/.linear-sdlc/wiki/CLAUDE.md` tells Claude how to maintain this specific wiki — directory conventions, fan-out ingest workflow, contradiction-callout format, privacy rules. Scoped by directory proximity so it never collides with your repo's root `CLAUDE.md`. Scaffolded from `references/wiki-schema-template.md` by `/wiki init`; you and the LLM co-evolve it over time.
+
+**Ingest is a fan-out, not a single-page write.** Per llm_wiki, a single source typically touches 10+ pages: the primary page (e.g. `tickets/VER-42.md`) plus updates to every affected entity/concept page, with contradiction callouts inserted wherever new claims disagree with old ones. `/implement` Step 9.4 and `/debug` Step 6.5 run this automatically on successful completion. Every draft goes through a hard `lsdlc-wiki secret-scan` gate before write — any hit aborts the entire ingest, no partial writes.
+
+**Nothing auto-commits.** Wiki edits land in the working tree and show up in `git status` for your review before origin.
+
+**Search scales from grep to hybrid.** By default `lsdlc-wiki search` uses grep with title-match and recency boosting. Install [qmd](https://github.com/tobi/qmd) and run `/wiki qmd-setup` to upgrade to BM25 + vector + LLM re-ranking, on-device. Registering qmd as a Claude Code MCP server makes it a native tool Claude calls directly. See [LLM Wiki](#llm-wiki) for the full model.
+
+Every skill loads relevant learnings and prints the wiki status line (page count, contradictions, last log entry) at startup via the shared preamble, so context accumulates across sessions — and across teammates, once someone commits the wiki directory.
 
 ### Timeline
 
