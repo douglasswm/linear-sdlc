@@ -5,7 +5,7 @@ This repo is a set of Claude Code skills that implement a Linear-driven SDLC wor
 ## Layout
 
 - `SKILL.md` (root) — session-start skill loaded when users say "linear-sdlc". Runs a preamble and dispatches to sub-skills.
-- `<skill>/SKILL.md` — one per skill: `brainstorm`, `create-tickets`, `next`, `implement`, `checkpoint`, `health`. Each has YAML frontmatter (`name`, `description`, `model`, `effort`, `allowed-tools`) followed by the prompt body.
+- `<skill>/SKILL.md` — one per skill: `brainstorm`, `create-tickets`, `next`, `implement`, `debug`, `checkpoint`, `health`. Each has YAML frontmatter (`name`, `description`, `model`, `effort`, `allowed-tools`) followed by the prompt body.
 - `implement/specialists/*.md` — checklists consumed by parallel sub-agents during `/implement`'s self-review phase (testing, security, performance, code-quality).
 - `bin/lsdlc-*` — shell helpers for state management. `lsdlc-slug` derives the project slug from the git remote, `lsdlc-config` reads/writes `~/.linear-sdlc/config.json`, `lsdlc-learnings-*` and `lsdlc-timeline-log` append to JSONL state files, `lsdlc-wiki-*` synthesize learnings into markdown pages.
 - `templates/spec-template.md` — the spec file `/brainstorm` writes and `/create-tickets` reads.
