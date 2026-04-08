@@ -10,7 +10,7 @@
   "repository": "https://github.com/douglasswm/linear-sdlc",
   "license": "MIT",
   "keywords": ["linear", "sdlc", "workflow", "skills", "tickets"],
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./.claude-plugin/mcp.json",
   "userConfig": {
     "linear_api_key": {
       "type": "string",
