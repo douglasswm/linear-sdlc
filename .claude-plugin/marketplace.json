@@ -8,7 +8,7 @@
     {
       "name": "linear-sdlc",
       "description": "Linear-driven SDLC workflow: ticket-driven development with brainstorming, implementation, specialist review, debugging, checkpoint/resume, and health monitoring",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "source": "./"
     }
   ]

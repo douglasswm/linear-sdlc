@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.1 — 2026-04-08 — /doctor warning fix
+
+### Fixed
+- **Moved MCP config from `.mcp.json` to `.claude-plugin/mcp.json`.** Claude Code's project-scope `.mcp.json` scanner was picking up the plugin's MCP config from the repo root and emitting a bogus `Missing environment variables: user_config.linear_api_key` warning in `/doctor`, because that scanner doesn't understand plugin userConfig interpolation. The plugin loader still finds the file via the updated `mcpServers` path in `plugin.json`, so install, enable, and the Linear MCP server all behave identically — only the spurious warning is gone.
+
 ## v1.0.0 — 2026-04-08 — Plugin release
 
 linear-sdlc is now a Claude Code plugin. This is the first tagged release.

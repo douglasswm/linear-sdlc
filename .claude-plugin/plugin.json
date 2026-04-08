@@ -1,6 +1,6 @@
 {
   "name": "linear-sdlc",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Linear-driven SDLC workflow for Claude Code: ticket-driven development with brainstorming, ticket creation, implementation, specialist reviews, debugging, checkpoints, and health monitoring — all powered by the Linear MCP server.",
   "author": {
     "name": "Douglas Smith",
