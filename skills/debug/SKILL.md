@@ -143,13 +143,20 @@ is `true`:
    "Known issues" section or extending an existing one, with a relative
    link back to the incident. Insert contradiction callouts on any
    conflicting claims.
-6. **Secret-scan every draft:**
+6. **Secret-scan every draft.** Pass all drafts to a single
+   `lsdlc-wiki secret-scan` invocation — it exits 3 on any hit. Gate
+   steps 7-11 on the exit code. Any hit aborts the **entire** ingest,
+   no partial writes:
    ```bash
-   for draft in "$WIKI_DIR/incidents/<slug>.md" <other drafts>; do
-     lsdlc-wiki secret-scan "$draft" || { echo "ABORT: secret-scan hit"; break; }
-   done
+   if lsdlc-wiki secret-scan "$WIKI_DIR/incidents/<slug>.md" "<other drafts>"; then
+     INCIDENT_SCAN_OK=1
+   else
+     INCIDENT_SCAN_OK=0
+     echo "WIKI: incident write aborted — secret-scan found issues, no files written"
+   fi
    ```
-   Any hit aborts the **entire** ingest. Do NOT write any file.
+   Only if `$INCIDENT_SCAN_OK -eq 1`, continue with steps 7-11.
+   Otherwise skip the rest of step 6.5 and return to the normal flow.
 7. Write all drafts.
 8. `lsdlc-wiki index-upsert incidents/<slug>.md Incidents "<short description>"`
 9. For each updated entity page, run index-upsert too.

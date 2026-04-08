@@ -330,14 +330,20 @@ Respect the user's choice — this is a nudge, not a gate.
    e. If new claims contradict existing text on any page, insert the
       contradiction callout from the wiki `CLAUDE.md` — never silently
       overwrite.
-   f. **Secret-scan every draft** before writing:
+   f. **Secret-scan every draft** before writing. Pass all drafts to a
+      single `lsdlc-wiki secret-scan` invocation — it exits 3 on any hit.
+      Gate steps (g) through (l) on the exit code. Any hit aborts the
+      **entire** ingest — no partial writes.
       ```bash
-      for draft in "$WIKI_DIR/tickets/$TICKET_ID.md" <other drafts>; do
-        lsdlc-wiki secret-scan "$draft" || { echo "ABORT: secret-scan hit"; break; }
-      done
+      if lsdlc-wiki secret-scan "$WIKI_DIR/tickets/$TICKET_ID.md" "$WIKI_DIR/entities/auth.md" "<other drafts>"; then
+        WIKI_SCAN_OK=1
+      else
+        WIKI_SCAN_OK=0
+        echo "WIKI: ingest aborted — secret-scan found issues, no files written"
+      fi
       ```
-      If any draft fails the scan, **abort the entire ingest**. Do NOT
-      write any file. Print the failure and move on.
+      Only if `$WIKI_SCAN_OK -eq 1`, proceed with steps g–l. Otherwise
+      skip the rest of step 4 entirely and continue to step 5.
    g. Write all drafts.
    h. For each new/changed page, run
       `lsdlc-wiki index-upsert <rel-path> <Category> <one-line-summary>`.

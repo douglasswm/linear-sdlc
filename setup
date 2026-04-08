@@ -177,7 +177,11 @@ elif [ -z "$EXISTING_WIKI_SCOPE" ]; then
     # manually. Respect that — leave it unset (preamble will fall back to
     # private behavior).
     log "  wiki_scope unset (previously initialized, respecting manual unset)"
-  elif [ -f "$CONFIG_FILE" ] && [ "$(node -e "const c=JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf8')); process.stdout.write(Object.keys(c).filter(k => k !== 'source_dir' && k !== 'skill_prefix' && k !== 'wiki_scope').length.toString())" 2>/dev/null || echo 0)" -gt 0 ]; then
+  # Count config keys other than the three setup always writes. Pass the
+  # config path via argv so the JS string literal never contains an
+  # interpolated path — matches the project convention in CLAUDE.md
+  # ("never interpolate into node -e string literals").
+  elif [ -f "$CONFIG_FILE" ] && [ "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(Object.keys(c).filter(k => k!=="source_dir" && k!=="skill_prefix" && k!=="wiki_scope").length.toString())' "$CONFIG_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
     # Existing install (other config keys present) — opt-out auto-upgrade.
     config_set wiki_scope repo
     touch "$WIKI_MARKER"

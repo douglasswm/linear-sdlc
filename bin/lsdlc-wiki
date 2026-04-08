@@ -358,6 +358,14 @@ function categoryForPath(relPath) {
   return map[first] || 'Other';
 }
 
+// Escape regex metacharacters so an arbitrary string can be embedded
+// inside a RegExp literal without breaking the pattern. Used by
+// cmdIndexUpsert so category names with parens, dots, plus signs, etc.
+// match literally.
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function cmdIndexUpsert(args) {
   const pagePath = args[0];
   const category = args[1];
@@ -374,8 +382,9 @@ function cmdIndexUpsert(args) {
   let content = fs.readFileSync(indexPath, 'utf8');
   const lines = content.split('\n');
 
-  // Find category heading. Match case-insensitively.
-  const headingRe = new RegExp(`^##\\s+${category}\\s*$`, 'i');
+  // Find category heading. Match case-insensitively. Escape so a
+  // category like "User-Facing (UI)" or "C++" doesn't break the regex.
+  const headingRe = new RegExp(`^##\\s+${escapeRegex(category)}\\s*$`, 'i');
   let sectionIdx = lines.findIndex(l => headingRe.test(l));
   if (sectionIdx < 0) {
     // Append a new section at the end
@@ -504,14 +513,19 @@ function cmdLint() {
     }
   }
 
-  // 2. Orphans — pages with no inbound link from any other page and not in index
+  // 2. Orphans — pages with no inbound link from any other page and not in index.
+  //
+  // Match on the parenthesized link form "(rel-path)" so that e.g.
+  // `entities/auth.md` is NOT considered referenced just because
+  // `concepts/auth.md` shares a basename. Substring-by-basename matching
+  // was the old behavior and produced false negatives.
   const indexContent = readFileOrEmpty(path.join(wiki, 'index.md'));
   const allText = pages.map(p => readFileOrEmpty(p)).join('\n');
   const orphans = [];
   for (const rel of relPages) {
-    const base = path.basename(rel);
-    const inIndex = indexContent.includes(rel) || indexContent.includes(base);
-    const inboundLink = allText.includes(rel) || allText.includes(base);
+    const needle = `(${rel})`;
+    const inIndex = indexContent.includes(needle);
+    const inboundLink = allText.includes(needle);
     if (!inIndex && !inboundLink) orphans.push(rel);
   }
 
@@ -672,20 +686,10 @@ function cmdMigrate() {
   process.stdout.write(`Imported ${copied} legacy files into ${path.relative(wiki, dest)}/\n`);
   process.stdout.write('Next: run `/wiki ingest --source sources/legacy/<file>` for each one to integrate.\n');
 
-  // Log it
-  runInternal('log-append', ['migrate', `imported ${copied} legacy files`, '--touched', 'sources/legacy/']);
-}
-
-function runInternal(sub, args) {
-  // Re-enter our own dispatcher without exec cost
-  try {
-    const prev = process.argv;
-    process.argv = [process.argv[0], process.argv[1], sub, ...args];
-    dispatch(false);
-    process.argv = prev;
-  } catch (e) {
-    // best-effort
-  }
+  // Log it. We call the same in-process function rather than re-entering
+  // the dispatcher, so a future secret-scan added to any shared code path
+  // can't accidentally exit(3) out from under us here.
+  try { cmdLogAppend(['migrate', `imported ${copied} legacy files`, '--touched', 'sources/legacy/']); } catch {}
 }
 
 // ─── Subcommand: ingest-source ────────────────────────────────
@@ -712,7 +716,7 @@ function cmdIngestSource(args) {
   fs.copyFileSync(src, dest);
 
   const rel = path.join(subdir, base);
-  runInternal('log-append', ['ingest-source', rel, '--touched', rel]);
+  try { cmdLogAppend(['ingest-source', rel, '--touched', rel]); } catch {}
 
   process.stdout.write(`Imported ${rel}\n`);
   process.stdout.write(`DIRECTIVE_TO_CLAUDE: Read ${rel}, synthesize fan-out wiki updates, then run lsdlc-wiki index-upsert + log-append.\n`);
@@ -793,36 +797,45 @@ function cmdSyncLinear(args) {
     }
   }
 
-  // Push each page
-  let pushed = 0;
-  for (const a of actions) {
-    const body = fs.readFileSync(a.abs, 'utf8');
-    const banner = `> **Source:** \`.linear-sdlc/wiki/${a.rel}\` — edits made here will be overwritten on the next sync.\n\n`;
-    const title = deriveTitle(body, a.rel);
-    // Write to a temp file so we don't pass large content on argv
-    const tmp = path.join(os.tmpdir(), `lsdlc-wiki-sync-${process.pid}-${pushed}.md`);
-    fs.writeFileSync(tmp, banner + body, 'utf8');
-    try {
-      const result = spawnSync('lsdlc-linear', [
-        'document-upsert',
-        '--project-id', projectId,
-        '--id', a.docId,
-        '--title', title,
-        '--content-file', tmp,
-      ], { encoding: 'utf8' });
-      if (result.status !== 0) {
-        process.stderr.write(`sync-linear: failed on ${a.rel}: ${result.stderr}\n`);
-      } else {
-        manifest[a.rel] = a.docId;
-        pushed++;
+  // Private per-sync temp directory (mode 0700) so wiki content isn't
+  // exposed to other local users while we hand it to lsdlc-linear via a
+  // file path. Under wiki_scope=private the wiki may contain material
+  // the user explicitly wanted to keep off the shared repo — leaking it
+  // to world-readable /tmp would undo that choice.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsdlc-wiki-sync-'));
+  try {
+    // Push each page
+    let pushed = 0;
+    for (const a of actions) {
+      const body = fs.readFileSync(a.abs, 'utf8');
+      const banner = `> **Source:** \`.linear-sdlc/wiki/${a.rel}\` — edits made here will be overwritten on the next sync.\n\n`;
+      const title = deriveTitle(body, a.rel);
+      const tmp = path.join(tmpDir, `page-${pushed}.md`);
+      fs.writeFileSync(tmp, banner + body, { encoding: 'utf8', mode: 0o600 });
+      try {
+        const result = spawnSync('lsdlc-linear', [
+          'document-upsert',
+          '--project-id', projectId,
+          '--id', a.docId,
+          '--title', title,
+          '--content-file', tmp,
+        ], { encoding: 'utf8' });
+        if (result.status !== 0) {
+          process.stderr.write(`sync-linear: failed on ${a.rel}: ${result.stderr}\n`);
+        } else {
+          manifest[a.rel] = a.docId;
+          pushed++;
+        }
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
       }
-    } finally {
-      try { fs.unlinkSync(tmp); } catch {}
     }
-  }
 
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-  process.stdout.write(`Pushed ${pushed} pages to Linear.\n`);
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    process.stdout.write(`Pushed ${pushed} pages to Linear.\n`);
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 function deriveTitle(body, rel) {
