@@ -19,8 +19,39 @@ echo "  gh $(gh --version | head -1)"
 echo "  git $(git --version)"
 echo ""
 
-# 2. Get Linear API key
-if [ -z "${LINEAR_API_KEY:-}" ]; then
+# 2. Detect existing Linear API key (supports rotating/updating the key)
+SETTINGS="$HOME/.claude/settings.json"
+mkdir -p "$(dirname "$SETTINGS")"
+
+EXISTING_KEY=""
+if [ -f "$SETTINGS" ]; then
+  EXISTING_KEY=$(SETTINGS_PATH="$SETTINGS" node -e "
+    try {
+      const s = JSON.parse(require('fs').readFileSync(process.env.SETTINGS_PATH, 'utf8'));
+      const k = s && s.mcpServers && s.mcpServers.linear && s.mcpServers.linear.env && s.mcpServers.linear.env.LINEAR_API_KEY;
+      if (typeof k === 'string' && k && !k.includes('YOUR_LINEAR_API_KEY')) process.stdout.write(k);
+    } catch {}
+  ")
+fi
+
+# Env var always wins (non-interactive installs / CI)
+if [ -n "${LINEAR_API_KEY:-}" ]; then
+  :
+elif [ -n "$EXISTING_KEY" ]; then
+  MASKED="***${EXISTING_KEY: -4}"
+  echo "A Linear API key is already configured ($MASKED)."
+  printf "Replace it? [y/N] "
+  read -r REPLY
+  echo ""
+  if [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]; then
+    printf "Enter new Linear API key: "
+    read -r LINEAR_API_KEY
+    echo ""
+  else
+    LINEAR_API_KEY="$EXISTING_KEY"
+    echo "  Keeping existing key."
+  fi
+else
   echo "Enter your Linear API key (from Linear Settings → API → Personal API keys):"
   read -r LINEAR_API_KEY
   echo ""
@@ -32,38 +63,21 @@ if [ -z "$LINEAR_API_KEY" ]; then
 fi
 
 # 3. Configure MCP server in ~/.claude/settings.json
-SETTINGS="$HOME/.claude/settings.json"
-mkdir -p "$(dirname "$SETTINGS")"
-
+# Pass the key via env var so special characters in the key cannot break JS string literals
 echo "Configuring Linear MCP server..."
-if [ -f "$SETTINGS" ]; then
-  # Merge mcpServers.linear into existing settings
-  node -e "
-    const fs = require('fs');
-    const s = JSON.parse(fs.readFileSync('$SETTINGS', 'utf8'));
-    s.mcpServers = s.mcpServers || {};
-    s.mcpServers.linear = {
-      type: 'npm',
-      package: '@anthropic-ai/linear-mcp-server',
-      env: { LINEAR_API_KEY: '$LINEAR_API_KEY' }
-    };
-    fs.writeFileSync('$SETTINGS', JSON.stringify(s, null, 2) + '\n');
-  "
-else
-  cat > "$SETTINGS" << EOF
-{
-  "mcpServers": {
-    "linear": {
-      "type": "npm",
-      "package": "@anthropic-ai/linear-mcp-server",
-      "env": {
-        "LINEAR_API_KEY": "$LINEAR_API_KEY"
-      }
-    }
-  }
-}
-EOF
-fi
+LINEAR_API_KEY="$LINEAR_API_KEY" SETTINGS_PATH="$SETTINGS" node -e "
+  const fs = require('fs');
+  const file = process.env.SETTINGS_PATH;
+  let s = {};
+  try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  s.mcpServers = s.mcpServers || {};
+  s.mcpServers.linear = {
+    type: 'npm',
+    package: '@anthropic-ai/linear-mcp-server',
+    env: { LINEAR_API_KEY: process.env.LINEAR_API_KEY }
+  };
+  fs.writeFileSync(file, JSON.stringify(s, null, 2) + '\n');
+"
 echo "  MCP server configured in $SETTINGS"
 
 # 4. Create state directory

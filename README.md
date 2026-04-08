@@ -16,10 +16,12 @@ Before installing, make sure you have:
 ### Option 1: One-liner (paste into Claude Code)
 
 ```
-Install linear-sdlc: run git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup then add a "Linear SDLC" section to CLAUDE.md that says to use the Linear MCP server for all issue management, and lists the available skills: /brainstorm, /create-tickets, /next, /implement, /checkpoint, /health. Then ask the user if they also want to add linear-sdlc to the current project so teammates get it.
+Install linear-sdlc. First ask me for my Linear API key (from Linear Settings → API → Personal API keys) — note that the key will appear in our chat transcript. Then run: git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && LINEAR_API_KEY="<the key I gave you>" ./setup. (The LINEAR_API_KEY env var makes setup non-interactive — do NOT try to run ./setup without it, it will hang waiting on stdin.) After setup succeeds, add a "Linear SDLC" section to CLAUDE.md that says to use the Linear MCP server for all issue management, and lists the available skills: /brainstorm, /create-tickets, /next, /implement, /checkpoint, /health. Then ask me whether to also add linear-sdlc to the current project so teammates get it. Finally, remind me to restart Claude Code so the MCP server picks up the new key.
 ```
 
-Claude will handle the rest — clone the repo, run setup, and configure your project.
+Claude will ask for your key, clone the repo, run setup non-interactively, update your `CLAUDE.md`, and remind you to restart.
+
+**Privacy note:** because Claude needs the key to pass it to `setup`, the key will appear in the conversation's tool-call transcript. If that bothers you, use Option 2 (manual install) instead — `./setup` prompts for the key in your terminal and the key never touches the Claude conversation.
 
 ### Option 2: Manual install
 
@@ -242,6 +244,22 @@ cd ~/.claude/skills/linear-sdlc && git pull
 ```
 
 No build step required — changes take effect on the next Claude Code session.
+
+### Rotating your Linear API key
+
+Re-run `./setup` at any time. It detects the existing key, shows a masked preview, and asks whether to replace it:
+
+```bash
+cd ~/.claude/skills/linear-sdlc && ./setup
+```
+
+For non-interactive updates (e.g., CI), pass the new key via env var — it skips the prompt:
+
+```bash
+LINEAR_API_KEY=lin_api_xxx ./setup
+```
+
+Restart Claude Code after updating the key so the MCP server picks it up.
 
 ## License
 
