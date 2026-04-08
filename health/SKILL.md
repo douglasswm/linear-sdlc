@@ -148,6 +148,8 @@ If a tool is missing, redistribute its weight equally to the remaining tools.
 
 ## Step 4: Display Dashboard
 
+**Follow `references/verification-gate.md`** — scores must reflect the runs from Step 2, not memory. Surface the provenance (timestamp or run-marker per tool) in the dashboard so the user can see the evidence is fresh.
+
 ```
 ## Code Health Dashboard
 
@@ -159,6 +161,8 @@ If a tool is missing, redistribute its weight equally to the remaining tools.
 | Dead Code | vulture | 10/10 | 0 findings |
 
 ### Composite Score: 8.4/10 ████████░░
+
+Evidence: scores reflect runs from this session — pytest @ 15:30:02, ruff @ 15:30:04, mypy @ 15:30:07, vulture @ 15:30:11.
 
 ### Trend
 Previous: 7.8/10 (Apr 5)

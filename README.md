@@ -16,7 +16,7 @@ Before installing, make sure you have:
 ### Option 1: One-liner (paste into Claude Code)
 
 ```
-Install linear-sdlc. First ask me for my Linear API key (from Linear Settings → API → Personal API keys) — note that the key will appear in our chat transcript. Then run: git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && LINEAR_API_KEY="<the key I gave you>" ./setup. (The LINEAR_API_KEY env var makes setup non-interactive — do NOT try to run ./setup without it, it will hang waiting on stdin.) After setup succeeds, add a "Linear SDLC" section to CLAUDE.md that says to use the Linear MCP server for all issue management, and lists the available skills: /brainstorm, /create-tickets, /next, /implement, /checkpoint, /health. Then ask me whether to also add linear-sdlc to the current project so teammates get it. Finally, remind me to restart Claude Code so the MCP server picks up the new key.
+Install linear-sdlc. First ask me for my Linear API key (from Linear Settings → API → Personal API keys) — note that the key will appear in our chat transcript. Then run: git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && LINEAR_API_KEY="<the key I gave you>" ./setup. (The LINEAR_API_KEY env var makes setup non-interactive — do NOT try to run ./setup without it, it will hang waiting on stdin.) After setup succeeds, add a "Linear SDLC" section to CLAUDE.md that says to use the Linear MCP server for all issue management, and lists the available skills: /brainstorm, /create-tickets, /next, /implement, /debug, /checkpoint, /health. Then ask me whether to also add linear-sdlc to the current project so teammates get it. Finally, remind me to restart Claude Code so the MCP server picks up the new key.
 ```
 
 Claude will ask for your key, clone the repo, run setup non-interactively, update your `CLAUDE.md`, and remind you to restart.
@@ -41,7 +41,7 @@ cd ~/.claude/skills/linear-sdlc && ./setup
 2. **Configures the Linear MCP server** — Merges `@anthropic-ai/linear-mcp-server` into `~/.claude/settings.json` with your API key
 3. **Restricts file permissions on `settings.json`** — Sets mode `0600` (owner-only read/write) on POSIX systems so other local users and processes can't read your API key. On Windows under Git Bash / MSYS / Cygwin, also sets an explicit NTFS ACL via `icacls` granting full control to your user only. Silent no-op on filesystems that don't support either (e.g., WSL targeting a `/mnt/c` path — see the note below).
 4. **Creates the state directory** — `~/.linear-sdlc/` for learnings, timeline, checkpoints
-5. **Registers skills** — Creates symlinks in `~/.claude/skills/` so Claude Code discovers `/brainstorm`, `/create-tickets`, `/next`, `/implement`, `/checkpoint`, `/health`
+5. **Registers skills** — Creates symlinks in `~/.claude/skills/` so Claude Code discovers `/brainstorm`, `/create-tickets`, `/next`, `/implement`, `/debug`, `/checkpoint`, `/health`
 
 > **Platform note:** On macOS, Linux, and WSL (Linux-native home), step 3 uses `chmod 600`. On Windows Git Bash / MSYS / Cygwin it also runs `icacls /inheritance:r /grant:r <you>:F`. If you run `setup` under WSL but target a Windows-side path (`/mnt/c/...`), neither path applies and your `settings.json` will keep its default NTFS ACL — use Git Bash or run `icacls` manually if you need it locked down.
 
@@ -69,6 +69,7 @@ Each skill is configured with an appropriate Claude model and effort level to ba
 | `/create-tickets` | Convert spec files into Linear issues with dependencies | Sonnet | Medium |
 | `/next` | Query Linear for unblocked tickets, recommend what to work on | Haiku | Low |
 | `/implement` | Full lifecycle: ticket → branch → code → specialist review → PR | Sonnet | Medium |
+| `/debug` | Systematic bug investigation with component-boundary evidence | Sonnet | Medium |
 | `/checkpoint` | Save/resume working state across sessions | Sonnet | Low |
 | `/health` | Code quality dashboard with composite scoring | Sonnet | Medium |
 
@@ -76,6 +77,7 @@ Each skill is configured with an appropriate Claude model and effort level to ba
 
 - **`/brainstorm`** uses **Opus** because feature planning benefits from cross-domain synthesis and catching subtle product nuance. Medium effort is plenty for interactive Q&A — high effort is wasted when the human drives the pace.
 - **`/implement`** uses **Sonnet/Medium** because most tickets are small (one or two files, a handful of acceptance criteria). The heavy reasoning during specialist self-review runs in parallel sub-agents that can decide their own depth. For a genuinely architectural ticket, either run `/brainstorm` first to front-load the thinking, or manually bump `implement/SKILL.md` to `opus`/`high` for that session.
+- **`/debug`** uses **Sonnet/Medium** — diagnostic reasoning needs structure (component-boundary evidence, hypothesis discipline) but not Opus-level creativity. Medium effort leaves room for the soft invariant "observe before hypothesizing".
 - **`/create-tickets`** and **`/health`** use **Sonnet/Medium** — structured work with enough judgment (dependency inference, scoring) to benefit from medium effort.
 - **`/next`** uses **Haiku/Low** — it's a query, a rank, and a presentation. Haiku is faster and sufficient.
 - **`/checkpoint`** uses **Sonnet/Low** — mostly mechanical state dump/restore.
@@ -94,13 +96,15 @@ Start with `/brainstorm` to explore the idea, search Linear for existing related
 
 This walks you through a structured discussion (problem, impact, solution shape, scope, technical approach) and writes a spec to `specs/rate-limiting.md`.
 
+**Deep design mode.** For features that span multiple subsystems, require architecture decisions, or need a formal design process, `/brainstorm` automatically switches into an inline **deep-design mode**: it scans the codebase for grounding, proposes 2–3 approaches with a trade-off table, walks through the chosen design section-by-section (data model → API → failure modes → rollout) with per-section approval, and runs a self-review checklist before writing the spec. No external skills or plugins required — it's all inline.
+
 When the spec is ready, convert it to Linear tickets:
 
 ```
 /create-tickets specs/rate-limiting.md
 ```
 
-This creates a parent issue and sub-issues in Linear with proper dependencies, priorities, and labels. You confirm the breakdown before anything is created.
+This creates a parent issue and sub-issues in Linear with proper dependencies, priorities, and labels. You confirm the breakdown before anything is created. If the spec touches three or more subsystems, `/create-tickets` will also ask whether to bundle them under one parent or split into multiple parents for independent release trains.
 
 ### Picking what to work on
 
@@ -134,6 +138,18 @@ Full lifecycle for a single ticket:
 10. **Logs learnings and timeline** for future sessions
 
 Critical findings from specialists must be fixed before the PR is created. Warnings are presented for your decision.
+
+Before the PR is pushed, `/implement` also runs a **completeness check** — a placeholder/TODO scan across the diff and an acceptance-criteria walkthrough — so stray `TODO`s and unfinished criteria get surfaced. The check is advisory, not blocking: you decide whether to fix now, file a follow-up ticket, or accept as-is.
+
+### Debugging a bug
+
+```
+/debug
+```
+
+Systematic bug investigation. The skill walks you through reproduce → identify component boundaries → instrument at each boundary → observe → hypothesize root cause → propose minimal fix. The core idea is **evidence before hypothesis**: gather data at the boundaries between components so you can pinpoint where wrong data first appears, rather than guessing from the crash site.
+
+This is a soft discipline, not an iron law — if the root cause is obvious, the user can skip ahead. A learning is logged automatically when an investigation surfaces something non-obvious about the project.
 
 ### Saving and resuming work
 

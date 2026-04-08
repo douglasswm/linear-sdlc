@@ -12,7 +12,6 @@ allowed-tools:
   - Write
   - Glob
   - Grep
-  - Skill
   - AskUserQuestion
 ---
 
@@ -82,25 +81,58 @@ If no duplicates found, proceed.
 
 ## Step 3: Assess Complexity
 
-Before diving into discussion, assess whether this feature needs a lightweight brainstorm or a full design process.
+Before diving into discussion, assess whether this feature needs **light mode** (jump to Step 4) or **deep-design mode** (run the expanded flow below, then continue to Step 5).
 
-**Escalate to `superpowers:brainstorming`** if ANY of these are true:
+**Deep-design mode triggers** — enter it if ANY are true:
 - The feature spans multiple independent subsystems (e.g., "build auth + billing + notifications")
 - It requires architecture decisions (new services, data model changes, API design)
 - It would benefit from visual mockups, wireframes, or architecture diagrams
 - The user explicitly asks for a "full design" or "design spec"
 
-If escalating, tell the user:
-```
-This feature is complex enough to benefit from a full design process with architecture review,
-approach trade-offs, and a formal spec. Handing off to the design brainstorming workflow.
-```
-Then invoke the `superpowers:brainstorming` skill. After it produces a design spec, return here and offer to run `/create-tickets` on it.
-
-**Stay in `/brainstorm`** if the feature is:
+**Light mode** (default) — stay in the normal flow if the feature is:
 - A well-scoped enhancement or addition to existing functionality
 - Clear enough to go straight from discussion to tickets
 - Something the user wants to move quickly on without a formal design phase
+
+### Deep-Design Mode (inline, no external skills)
+
+Run these sub-steps in order. This replaces Step 4 when deep-design mode is active.
+
+**3a. Project exploration.** Before proposing anything, ground the discussion in the actual codebase:
+- Read `README.md` and `CLAUDE.md` if they exist
+- List top-level directories (`ls -F`) to understand the project shape
+- Glob `specs/*.md` and skim any existing specs — they reveal conventions and prior decisions
+- Note what's missing: if you don't see what you expected (e.g. no tests, no docs for a module), that's signal
+
+Tell the user what you found in 3-5 lines before moving on.
+
+**3b. Propose 2-3 approaches.** Present them as a trade-off table, not prose. Example:
+
+| Approach | Complexity | Blast radius | Migration cost | Future flexibility |
+|---|---|---|---|---|
+| A. Inline in existing service | Low | Medium | None | Low |
+| B. New sidecar service | High | Low | Medium | High |
+| C. Library shared across services | Medium | High | High | Medium |
+
+Use `AskUserQuestion` to pick an approach. Recommend one and say why.
+
+**3c. Chunked presentation.** Once an approach is picked, walk through the design **one section at a time**. Do not dump the whole design in one message. Pause for per-section approval via `AskUserQuestion` before moving to the next section. Sections, in order:
+
+1. **Data model** — entities, relationships, new/changed tables or types
+2. **API surface** — external interfaces, endpoints, function signatures users will see
+3. **Failure modes** — what can go wrong, how the system degrades, retry/rollback strategy
+4. **Rollout** — migration plan, feature flags, backwards compatibility, rollback path
+
+For each section: describe it, show a diagram or code snippet if it helps, then ask "Looks good? Anything to adjust before the next section?"
+
+**3d. Self-review checklist.** Before writing the spec file, walk through this checklist aloud with the user. If any item fails, fix it before continuing:
+
+- [ ] Every acceptance criterion the user mentioned has a concrete home in the design
+- [ ] No placeholder text, no `TODO`, no "we'll figure this out later"
+- [ ] Open questions are explicitly listed in the spec (under "Open Questions"), not hidden
+- [ ] Scope boundaries — what's explicitly **out** of V1 — are named
+
+**3e. Continue to Step 5** (skip Step 4 — the deep-design flow already covered the discussion).
 
 ## Step 4: Guided Discussion
 

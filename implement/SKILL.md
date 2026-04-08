@@ -204,6 +204,37 @@ If there are **Warnings**, present them to the user with AskUserQuestion and let
 echo '<FINDINGS_JSON>' >> "$_PROJ/$(echo $_BRANCH | tr '/' '-')-reviews.jsonl"
 ```
 
+### 7e: Completeness check
+
+Before creating the PR, scan the diff for placeholders and verify acceptance-criteria coverage. This is **advisory, not blocking** — the user decides how to proceed when something is flagged.
+
+```bash
+# Placeholder / TODO scan (warn only)
+git diff "$BASE_BRANCH"...HEAD | grep -nE '(TODO|FIXME|XXX|<placeholder>|<PLACEHOLDER>)' \
+  || echo "  (no placeholders)"
+```
+
+Then walk through this checklist aloud, one line at a time:
+
+- [ ] All acceptance criteria from the ticket have corresponding code changes (list each criterion → point at the file/line that satisfies it)
+- [ ] No new `TODO`/`FIXME`/`XXX` in this diff — or, if any, each has a follow-up ticket
+- [ ] Every new function/class has at least one call site (unless it's a public API entry point)
+- [ ] Every new file is imported, routed, or otherwise referenced from existing code
+
+If any item fails, report the gap and use `AskUserQuestion`:
+
+```
+**Re-ground:** Completeness check surfaced a gap before PR creation.
+**Context:** {which item failed and why it matters}
+
+**Options:**
+1. **Fix now** — address the gap before PR
+2. **Create a follow-up ticket** — file it in Linear, PR as-is
+3. **Accept as-is** — proceed to PR (user takes responsibility)
+```
+
+Respect the user's choice — this is a nudge, not a gate.
+
 ## Step 8: Create PR
 
 1. **Push branch:**
@@ -239,16 +270,29 @@ echo '<FINDINGS_JSON>' >> "$_PROJ/$(echo $_BRANCH | tr '/' '-')-reviews.jsonl"
 
 ## Step 9: Wrap Up
 
-1. **Log completion:**
+**Follow `references/verification-gate.md`** — evidence before claims. Run the verification commands first, paste the literal output, then state `STATUS: DONE`.
+
+1. **Capture fresh evidence.** Run and display the literal output:
+   ```bash
+   git log -1 --oneline
+   git status --short
+   gh pr view --json url,state -q '.url + " (" + .state + ")"' 2>/dev/null || echo "PR not created"
+   ```
+
+2. **Log completion:**
    ```bash
    ~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"implement","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","ticket":"VER-42","pr":"PR_URL","session":"'"$_SESSION_ID"'"}' 2>/dev/null
    ```
 
-2. **Log any learnings** discovered during implementation
+3. **Log any learnings** discovered during implementation
 
-3. **Report status:**
+4. **Report status** — cite the verification output verbatim, don't restate from memory:
    ```
    STATUS: DONE
+   EVIDENCE:
+     <literal `git log -1 --oneline` output>
+     <literal `git status --short` output>
+     <literal `gh pr view` output or "PR not created">
    SUMMARY: Implemented VER-42 (auth middleware refactor), PR #123 created, ticket set to In Review
    ```
 

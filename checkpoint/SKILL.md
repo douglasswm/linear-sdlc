@@ -92,14 +92,20 @@ If there's an active `/implement` session, extract this from the conversation co
 
 ### Step 3: Write Checkpoint
 
-Generate a timestamp and title:
+**Follow `references/verification-gate.md`** — capture literal shell output before writing the checkpoint, not a paraphrase from conversation memory. A resumed checkpoint is only as trustworthy as its evidence.
+
+Generate a timestamp and title, then capture git state verbatim:
 ```bash
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-# Title from ticket or user-provided
 TITLE="ver-42-auth-refactor"
+
+# Capture literal git output for the checkpoint file
+GIT_STATUS=$(git status --short)
+GIT_LAST_COMMIT=$(git log -1 --oneline)
+GIT_DIFFSTAT=$(git diff --stat)
 ```
 
-Write the checkpoint file:
+Write the checkpoint file, embedding the literal output under `## Git State (verbatim)`:
 
 ```markdown
 ---
@@ -127,10 +133,25 @@ ticket_status: In Progress
 ## Open Questions
 - Should we support refresh tokens in this ticket or defer?
 
-## Git State
-- Branch: feat/ver-42-auth-refactor
-- Last commit: abc1234 "refactor: extract auth middleware"
-- Uncommitted changes: 2 files modified
+## Git State (verbatim)
+
+Last commit:
+```
+abc1234 refactor: extract auth middleware
+```
+
+Working tree (`git status --short`):
+```
+ M auth/middleware.py
+ M tests/test_auth.py
+```
+
+Diffstat (`git diff --stat`):
+```
+ auth/middleware.py  | 42 ++++++++++++++++--
+ tests/test_auth.py  | 18 ++++++++
+ 2 files changed, 58 insertions(+), 2 deletions(-)
+```
 
 ## Key Decisions Made
 - Using PyJWT instead of python-jose (simpler API, fewer deps)

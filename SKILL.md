@@ -75,6 +75,7 @@ When the user's request matches one of these patterns, invoke the corresponding 
 | "create tickets", "make issues", "spec to tickets", "break this down" | `/create-tickets` |
 | "what should I work on", "next ticket", "pick a task", "what's next" | `/next` |
 | "implement", "work on VER-", "start ticket", "build VER-" | `/implement` |
+| "debug", "why is this broken", "investigate bug", "test is failing" | `/debug` |
 | "checkpoint", "save progress", "where was I", "resume" | `/checkpoint` |
 | "health", "code quality", "run checks", "how healthy" | `/health` |
 
@@ -86,6 +87,7 @@ When routing, announce the skill you're invoking: "Using `/implement` to work on
 - **`/create-tickets`** — Convert spec files into Linear issues with dependencies
 - **`/next`** — Query Linear for unblocked tickets, recommend what to work on
 - **`/implement`** — Full lifecycle: load ticket → branch → code → specialist review → PR
+- **`/debug`** — Systematic bug investigation with component-boundary evidence
 - **`/checkpoint`** — Save/resume working state across sessions
 - **`/health`** — Code quality dashboard with composite scoring
 

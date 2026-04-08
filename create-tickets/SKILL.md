@@ -61,6 +61,28 @@ Read and parse the spec file. Extract:
 - **Technical approach** (from the Technical Approach section)
 - **Acceptance criteria** (from the Acceptance Criteria section)
 
+## Step 1b: Scope Check
+
+Before planning the ticket breakdown, scan the spec for scope sprawl. If the work touches **many subsystems**, the right granularity may be multiple parent issues rather than one.
+
+Heuristic:
+1. Count distinct subsystems mentioned in the spec. A subsystem is any top-level `##`/`###` heading that names a service, module, or area (e.g. "Auth", "Billing", "Notifications"), plus any explicit service/module names in the technical approach.
+2. If **≥ 3 distinct subsystems** are touched and the user hasn't already explicitly asked for one parent, ask:
+
+```
+**Re-ground:** This spec touches {N} subsystems: {comma-separated list}.
+
+**Context:** Bundling all of this under one parent works if it ships together; splitting
+into separate parents works better if each subsystem can ship independently.
+
+**Options:**
+1. **One parent with sub-issues** — recommended if everything ships as one release
+2. **{N} separate parent issues** — recommended if each subsystem can ship independently
+3. **Proceed as-is** — you decide the breakdown in the next step
+```
+
+Respect the user's choice and carry it into Step 2. If fewer than 3 subsystems, skip this check and go straight to Step 2.
+
 ## Step 2: Plan the Ticket Breakdown
 
 Analyze the spec and propose a ticket structure:
