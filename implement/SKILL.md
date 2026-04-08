@@ -4,8 +4,8 @@ description: |
   Full implementation lifecycle for a Linear ticket. Loads ticket context,
   creates branch, implements code, runs specialist self-review, creates PR.
   Use when: "implement VER-42", "work on ticket", "start VER-", "build this ticket".
-model: opus
-effort: high
+model: sonnet
+effort: medium
 allowed-tools:
   - Bash
   - Read

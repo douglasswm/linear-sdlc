@@ -62,14 +62,22 @@ Each skill is configured with an appropriate Claude model and effort level to ba
 
 | Skill | Description | Model | Effort |
 |-------|-------------|-------|--------|
-| `/brainstorm` | Plan new features, search for duplicates, write specs | Opus | High |
+| `/brainstorm` | Plan new features, search for duplicates, write specs | Opus | Medium |
 | `/create-tickets` | Convert spec files into Linear issues with dependencies | Sonnet | Medium |
 | `/next` | Query Linear for unblocked tickets, recommend what to work on | Haiku | Low |
-| `/implement` | Full lifecycle: ticket → branch → code → specialist review → PR | Opus | High |
+| `/implement` | Full lifecycle: ticket → branch → code → specialist review → PR | Sonnet | Medium |
 | `/checkpoint` | Save/resume working state across sessions | Sonnet | Low |
 | `/health` | Code quality dashboard with composite scoring | Sonnet | Medium |
 
-**Why different models?** Skills that require deep reasoning (brainstorming, implementation) use Opus with high effort. Mechanical tasks (ticket creation, health checks) use Sonnet. Simple query-and-present tasks (next ticket) use Haiku for speed.
+**Why different models?** Defaults are tuned for cost and latency on typical tickets, not worst-case complexity:
+
+- **`/brainstorm`** uses **Opus** because feature planning benefits from cross-domain synthesis and catching subtle product nuance. Medium effort is plenty for interactive Q&A — high effort is wasted when the human drives the pace.
+- **`/implement`** uses **Sonnet/Medium** because most tickets are small (one or two files, a handful of acceptance criteria). The heavy reasoning during specialist self-review runs in parallel sub-agents that can decide their own depth. For a genuinely architectural ticket, either run `/brainstorm` first to front-load the thinking, or manually bump `implement/SKILL.md` to `opus`/`high` for that session.
+- **`/create-tickets`** and **`/health`** use **Sonnet/Medium** — structured work with enough judgment (dependency inference, scoring) to benefit from medium effort.
+- **`/next`** uses **Haiku/Low** — it's a query, a rank, and a presentation. Haiku is faster and sufficient.
+- **`/checkpoint`** uses **Sonnet/Low** — mostly mechanical state dump/restore.
+
+If a skill feels underpowered for your work, override it locally — just edit the `model:` and `effort:` lines in that skill's `SKILL.md`. Edits in `~/.claude/skills/linear-sdlc/` will conflict on the next `git pull` if upstream also touches the file, so fork the repo or keep a patch if you rely on a permanent override.
 
 ## Usage
 

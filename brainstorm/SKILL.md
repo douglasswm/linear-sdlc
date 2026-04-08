@@ -5,7 +5,7 @@ description: |
   and write a spec file. Use when: "brainstorm", "plan a feature", "new feature idea",
   "explore an idea".
 model: opus
-effort: high
+effort: medium
 allowed-tools:
   - Bash
   - Read
