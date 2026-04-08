@@ -20,22 +20,26 @@ allowed-tools:
 Run this first:
 
 ```bash
-_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-_PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
-mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
+# Bootstrap: resolve LINEAR_SDLC_ROOT from this skill's symlink, then source
+# the shared preamble (safe env loader + project detection + session tracking).
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _c in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_c" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_c")")/../.." && pwd)"
+      break
+    fi
+  done
+  [ -z "${LINEAR_SDLC_ROOT:-}" ] && LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || true)"
+  export LINEAR_SDLC_ROOT
+fi
+SKILL_NAME=health . "$LINEAR_SDLC_ROOT/references/preamble.sh"
 
-echo "BRANCH: $_BRANCH"
-echo "PROJECT: $_SLUG"
-
-# Previous health score
+# Previous health score (skill-specific display)
 if [ -f "$_PROJ/health-history.jsonl" ]; then
   _LAST_HEALTH=$(tail -1 "$_PROJ/health-history.jsonl" 2>/dev/null)
   echo "LAST_HEALTH: $_LAST_HEALTH"
 fi
-
-_SESSION_ID="$$-$(date +%s)"
-lsdlc-timeline-log '{"skill":"health","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -46,7 +50,12 @@ Check which quality tools are available in this project:
 
 ```bash
 # Test runner
-[ -f "pytest.ini" ] || [ -f "pyproject.toml" ] && grep -q "pytest" pyproject.toml 2>/dev/null && echo "TEST: pytest"
+# pytest: either pytest.ini alone (strong signal) OR pyproject.toml mentioning pytest.
+# Grouping matters — `[ -f pytest.ini ] || [ -f pyproject.toml ] && grep ... && echo`
+# parses as `((A || B) && grep) && echo`, which silently drops a standalone pytest.ini.
+if [ -f "pytest.ini" ] || { [ -f "pyproject.toml" ] && grep -q "pytest" pyproject.toml 2>/dev/null; }; then
+  echo "TEST: pytest"
+fi
 [ -f "jest.config.js" ] || [ -f "jest.config.ts" ] && echo "TEST: jest"
 [ -f "vitest.config.ts" ] || [ -f "vitest.config.js" ] && echo "TEST: vitest"
 grep -q '"test"' package.json 2>/dev/null && echo "TEST: npm test"

@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+# linear-sdlc setup — register skills with Claude Code, wire bin/ onto PATH,
+# capture Linear API key + team ID, and tell the user how to install the
+# official Linear MCP server (we never install it ourselves).
+#
+# Designed to be safe to re-run. Idempotent. Honors LSDLC_STATE_DIR.
+
+set -e
+umask 077  # New files default to 0600 / new dirs to 0700
+
+# ─── Resolve paths ─────────────────────────────────────────────
+SOURCE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+LOCAL_BIN="$HOME/.local/bin"
+STATE_DIR="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+
+# ─── Quiet mode helper ─────────────────────────────────────────
+QUIET=0
+log() { [ "$QUIET" -eq 0 ] && echo "$@" || true; }
+warn() { echo "$@" >&2; }
+
+# ─── Parse flags ───────────────────────────────────────────────
+SKILL_PREFIX=0
+SKILL_PREFIX_FLAG=0
+SKIP_API_KEY=0
+SKIP_MCP_PROMPT=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix)         SKILL_PREFIX=1; SKILL_PREFIX_FLAG=1; shift ;;
+    --no-prefix)      SKILL_PREFIX=0; SKILL_PREFIX_FLAG=1; shift ;;
+    --skip-api-key)   SKIP_API_KEY=1; shift ;;
+    --skip-mcp-prompt) SKIP_MCP_PROMPT=1; shift ;;
+    -q|--quiet)       QUIET=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: ./setup [flags]
+
+Flags:
+  --prefix          Use namespaced skill names (/linear-sdlc-brainstorm)
+  --no-prefix       Use short skill names (/brainstorm) — default
+  --skip-api-key    Don't prompt for the Linear API key
+  --skip-mcp-prompt Don't print the official Linear MCP install hint
+  -q, --quiet       Suppress informational logs
+  -h, --help        Show this message
+EOF
+      exit 0
+      ;;
+    *) warn "Unknown flag: $1"; exit 1 ;;
+  esac
+done
+
+# ─── Prereq checks ─────────────────────────────────────────────
+if ! command -v git >/dev/null 2>&1; then
+  warn "Error: git is required but not installed."
+  exit 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  warn "Error: node is required but not installed."
+  warn "  Install Node 18+ from https://nodejs.org/ or via your package manager."
+  exit 1
+fi
+
+# Require Node 18+ for built-in fetch
+NODE_MAJOR=$(node -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || echo 0)
+if [ "$NODE_MAJOR" -lt 18 ]; then
+  warn "Error: Node 18+ is required (built-in fetch). Detected: v$NODE_MAJOR"
+  warn "  Upgrade: https://nodejs.org/"
+  exit 1
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  warn "Warning: 'claude' CLI not found on PATH. linear-sdlc will still install,"
+  warn "  but you'll need Claude Code to actually run the skills."
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  warn "Note: GitHub CLI ('gh') not found. /implement uses it to create PRs."
+fi
+
+# ─── Set up directories ────────────────────────────────────────
+mkdir -p "$STATE_DIR/projects" "$CLAUDE_SKILLS_DIR" "$LOCAL_BIN"
+
+# ─── Helper: lsdlc-config wrapper (bin/ may not be on PATH yet) ─
+LSDLC_CONFIG="$SOURCE_DIR/bin/lsdlc-config"
+# get(): missing key is a normal "no value" — don't fail the script, return empty.
+config_get() { LSDLC_STATE_DIR="$STATE_DIR" "$LSDLC_CONFIG" get "$1" 2>/dev/null || true; }
+# set(): a write failure is a real problem — preamble's $LINEAR_SDLC_ROOT
+# resolver falls back to `lsdlc-config get source_dir`, so a silently-failed
+# write produces a confusing "spec template not found" error later. Surface
+# the failure with set -e (no `|| true`).
+config_set() { LSDLC_STATE_DIR="$STATE_DIR" "$LSDLC_CONFIG" set "$1" "$2"; }
+
+# ─── Skill prefix resolution ───────────────────────────────────
+# Priority: CLI flag > saved config > interactive prompt > default (short)
+if [ "$SKILL_PREFIX_FLAG" -eq 0 ]; then
+  _saved_prefix="$(config_get skill_prefix)"
+  if [ "$_saved_prefix" = "true" ]; then
+    SKILL_PREFIX=1
+  elif [ "$_saved_prefix" = "false" ]; then
+    SKILL_PREFIX=0
+  elif [ "$QUIET" -eq 1 ] || [ ! -t 0 ]; then
+    SKILL_PREFIX=0
+  else
+    echo ""
+    echo "Skill naming: how should linear-sdlc skills appear?"
+    echo ""
+    echo "  1) Short names: /brainstorm, /next, /implement"
+    echo "     Recommended. Clean and fast to type."
+    echo ""
+    echo "  2) Namespaced: /linear-sdlc-brainstorm, /linear-sdlc-next"
+    echo "     Use this if you run other skill packs alongside linear-sdlc to avoid conflicts."
+    echo ""
+    printf "Choice [1/2] (default: 1, auto-selects in 10s): "
+    read -t 10 -r _prefix_choice </dev/tty 2>/dev/null || _prefix_choice=""
+    case "$_prefix_choice" in
+      2) SKILL_PREFIX=1 ;;
+      *) SKILL_PREFIX=0 ;;
+    esac
+    echo ""
+  fi
+fi
+config_set skill_prefix "$([ "$SKILL_PREFIX" -eq 1 ] && echo true || echo false)"
+
+# ─── Persist source_dir for the preamble's resolver ────────────
+config_set source_dir "$SOURCE_DIR"
+
+# ─── Helper: link skill directories into ~/.claude/skills/ ─────
+# Mirrors gstack's approach: real top-level dirs containing a SKILL.md
+# symlink that points back into the repo. For /implement, we also symlink
+# the specialists/ subdirectory so the parallel sub-agent checklists resolve.
+#
+# Safety: never overwrite a regular (non-symlink) SKILL.md or specialists/
+# directory the user installed themselves. Only replace symlinks that we
+# previously created (resolved target inside $SOURCE_DIR) or fresh empty dirs.
+link_skills() {
+  local linked=() skipped=()
+  for skill_dir in "$SOURCE_DIR"/skills/*/; do
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    local dir_name link_name target
+    dir_name="$(basename "$skill_dir")"
+    if [ "$SKILL_PREFIX" -eq 1 ]; then
+      link_name="linear-sdlc-$dir_name"
+    else
+      link_name="$dir_name"
+    fi
+    target="$CLAUDE_SKILLS_DIR/$link_name"
+
+    # If target is itself a symlink (legacy whole-dir link), drop it.
+    if [ -L "$target" ]; then rm -f "$target"; fi
+
+    # If a real SKILL.md already exists and is NOT a symlink we own, refuse to clobber.
+    if [ -e "$target/SKILL.md" ] && [ ! -L "$target/SKILL.md" ]; then
+      warn "Refusing to overwrite existing skill: $target/SKILL.md"
+      warn "  This file is not a symlink we created. If it's an unrelated skill of yours,"
+      warn "  rename it or rerun setup with --prefix to install under a different name."
+      skipped+=("$link_name")
+      continue
+    fi
+    # If it IS a symlink, only replace if it points back into our SOURCE_DIR.
+    if [ -L "$target/SKILL.md" ]; then
+      local _existing
+      _existing="$(readlink "$target/SKILL.md" 2>/dev/null || true)"
+      case "$_existing" in
+        "$SOURCE_DIR"/*) rm -f "$target/SKILL.md" ;;
+        *)
+          warn "Refusing to overwrite foreign symlink at $target/SKILL.md (-> $_existing)"
+          skipped+=("$link_name")
+          continue
+          ;;
+      esac
+    fi
+
+    mkdir -p "$target"
+    ln -snf "$skill_dir/SKILL.md" "$target/SKILL.md"
+
+    # /implement needs the specialists/ subdir resolvable next to SKILL.md.
+    # Same safety: only replace a symlink we own.
+    if [ -d "$skill_dir/specialists" ]; then
+      if [ -L "$target/specialists" ]; then
+        local _spec_existing
+        _spec_existing="$(readlink "$target/specialists" 2>/dev/null || true)"
+        case "$_spec_existing" in
+          "$SOURCE_DIR"/*) rm -f "$target/specialists" ;;
+          *)
+            warn "Refusing to overwrite foreign specialists symlink at $target/specialists"
+            ;;
+        esac
+      elif [ -e "$target/specialists" ]; then
+        warn "Refusing to overwrite existing $target/specialists (not a symlink we own)"
+      fi
+      [ ! -e "$target/specialists" ] && ln -snf "$skill_dir/specialists" "$target/specialists"
+    fi
+    linked+=("$link_name")
+  done
+  if [ ${#linked[@]} -gt 0 ]; then
+    log "  linked skills: ${linked[*]}"
+  fi
+  if [ ${#skipped[@]} -gt 0 ]; then
+    warn "  skipped (would clobber existing files): ${skipped[*]}"
+  fi
+}
+
+# ─── Helper: clean up symlinks from the opposite prefix mode ───
+cleanup_opposite_mode() {
+  local removed=()
+  for skill_dir in "$SOURCE_DIR"/skills/*/; do
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    local dir_name opposite_name target
+    dir_name="$(basename "$skill_dir")"
+    # If we're going to short names, kill prefixed leftovers (and vice versa)
+    if [ "$SKILL_PREFIX" -eq 1 ]; then
+      opposite_name="$dir_name"
+    else
+      opposite_name="linear-sdlc-$dir_name"
+    fi
+    target="$CLAUDE_SKILLS_DIR/$opposite_name"
+    # Only remove if it points back into THIS repo (don't nuke unrelated user skills)
+    if [ -L "$target" ]; then
+      local link_dest
+      link_dest="$(readlink "$target" 2>/dev/null || true)"
+      case "$link_dest" in
+        "$SOURCE_DIR"/*) rm -f "$target"; removed+=("$opposite_name") ;;
+      esac
+    elif [ -d "$target" ] && [ -L "$target/SKILL.md" ]; then
+      local link_dest
+      link_dest="$(readlink "$target/SKILL.md" 2>/dev/null || true)"
+      case "$link_dest" in
+        "$SOURCE_DIR"/*) rm -rf "$target"; removed+=("$opposite_name") ;;
+      esac
+    fi
+  done
+  if [ ${#removed[@]} -gt 0 ]; then
+    log "  cleaned up opposite-mode entries: ${removed[*]}"
+  fi
+}
+
+# ─── Helper: kill any legacy plugin-era top-level skill ────────
+# The v1 plugin landed skills under /linear-sdlc:* — that's now obsolete.
+# Defensive: never touch $legacy if it IS the source checkout (user's
+# README-recommended clone path is $HOME/.claude/skills/linear-sdlc).
+cleanup_legacy_plugin_skill() {
+  local legacy="$CLAUDE_SKILLS_DIR/linear-sdlc"
+  # Refuse to operate on the source checkout itself.
+  [ "$legacy" = "$SOURCE_DIR" ] && return 0
+  if [ -L "$legacy" ]; then
+    rm -f "$legacy"
+    log "  removed legacy plugin-era symlink: $legacy"
+  elif [ -d "$legacy" ] && [ -L "$legacy/SKILL.md" ]; then
+    local link_dest
+    link_dest="$(readlink "$legacy/SKILL.md" 2>/dev/null || true)"
+    case "$link_dest" in
+      *linear-sdlc*) rm -rf "$legacy"; log "  removed legacy plugin-era dir: $legacy" ;;
+    esac
+  fi
+}
+
+# ─── Run skill linking ─────────────────────────────────────────
+cleanup_legacy_plugin_skill
+cleanup_opposite_mode
+link_skills
+
+# ─── Wire bin/ onto PATH via ~/.local/bin ──────────────────────
+# Don't chmod the source file itself — that mutates the user's checkout
+# (and would fail on read-only filesystems). The bin/ scripts ship with
+# the executable bit already set in git.
+linked_bins=()
+for f in "$SOURCE_DIR"/bin/*; do
+  [ -f "$f" ] || continue
+  base="$(basename "$f")"
+  ln -snf "$f" "$LOCAL_BIN/$base"
+  linked_bins+=("$base")
+done
+if [ ${#linked_bins[@]} -gt 0 ]; then
+  log "  linked bin scripts: ${linked_bins[*]}"
+fi
+
+# Warn (once) if ~/.local/bin isn't on PATH
+case ":$PATH:" in
+  *":$LOCAL_BIN:"*) ;;
+  *)
+    warn ""
+    warn "Note: $LOCAL_BIN is not on your PATH. Add this to your shell rc:"
+    warn ""
+    warn "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    warn ""
+    warn "Without it, the lsdlc-* helpers (and skills that call them) won't resolve."
+    ;;
+esac
+
+# ─── Linear API key prompt ─────────────────────────────────────
+ENV_FILE="$STATE_DIR/env"
+if [ "$SKIP_API_KEY" -eq 0 ]; then
+  if [ -f "$ENV_FILE" ] && grep -q "LINEAR_API_KEY" "$ENV_FILE" 2>/dev/null; then
+    if [ -t 0 ]; then
+      printf "Linear API key already saved at %s. Replace? [y/N] " "$ENV_FILE"
+      read -r _replace_key </dev/tty 2>/dev/null || _replace_key=""
+      case "$_replace_key" in
+        y|Y|yes|YES) NEED_KEY=1 ;;
+        *) NEED_KEY=0 ;;
+      esac
+    else
+      NEED_KEY=0
+    fi
+  else
+    NEED_KEY=1
+  fi
+
+  if [ "$NEED_KEY" -eq 1 ]; then
+    if [ -t 0 ]; then
+      echo ""
+      echo "Linear API key (https://linear.app/settings/api):"
+      printf "  > "
+      read -s -r _linear_key </dev/tty 2>/dev/null || _linear_key=""
+      echo ""
+      if [ -n "$_linear_key" ]; then
+        # Strict character whitelist: Linear personal API keys are alphanumeric
+        # plus underscore/hyphen, prefixed with `lin_api_` or `lin_oauth_`.
+        # Reject anything else to avoid:
+        #   - shell expansion of $, `, \ via heredocs/sourcing
+        #   - regex/parser confusion in lsdlc-linear over quotes/CR/LF
+        #   - silent truncation when the key gets sourced or re-parsed
+        if ! printf '%s' "$_linear_key" | grep -qE '^[A-Za-z0-9_-]+$'; then
+          warn "Error: API key has invalid characters. Linear keys are alphanumeric"
+          warn "  plus _ and -. If you copy-pasted, check for quotes or whitespace."
+          unset _linear_key
+          exit 1
+        fi
+        # Atomic write: temp file in the same dir + rename, so a concurrent
+        # skill reading the env file never sees a half-written state.
+        _ENV_TMP="$(mktemp "${ENV_FILE}.XXXXXX")" || { warn "Error: mktemp failed"; unset _linear_key; exit 1; }
+        umask 077
+        # Quoted heredoc: bash does NOT expand $/backtick/\\ in the body.
+        # `printf` for the key line keeps it on one line with no shell processing.
+        {
+          cat <<'HEADER_EOF'
+# linear-sdlc env — parsed by bin/lsdlc-linear and the shared preamble.
+# The preamble/lsdlc-linear parse the LINEAR_API_KEY line in pure shell/JS;
+# this file is never `.`-sourced, so arbitrary shell appended below this
+# line will NOT execute. Keep it that way.
+# chmod 600. Never commit. Plain-text storage; see README for alternatives
+# (1Password CLI, direnv, exporting from your shell rc).
+HEADER_EOF
+          printf "export LINEAR_API_KEY='%s'\n" "$_linear_key"
+        } > "$_ENV_TMP"
+        chmod 600 "$_ENV_TMP"
+        mv "$_ENV_TMP" "$ENV_FILE"
+        log "  wrote $ENV_FILE (mode 0600)"
+      else
+        warn "  no key entered — skipping."
+      fi
+      unset _linear_key
+    else
+      warn "  skipping API key prompt (non-interactive shell)"
+    fi
+  else
+    log "  keeping existing API key at $ENV_FILE"
+  fi
+fi
+
+# ─── Linear team ID prompt ─────────────────────────────────────
+# The value can be either a short team key (e.g., "VER") or a team UUID
+# (e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). bin/lsdlc-linear
+# auto-detects which form it is and picks the right GraphQL filter.
+EXISTING_TEAM="$(config_get linear_team_id)"
+if [ -n "$EXISTING_TEAM" ] && [ -t 0 ]; then
+  printf "Linear team ID is set to '%s'. Replace? [y/N] " "$EXISTING_TEAM"
+  read -r _replace_team </dev/tty 2>/dev/null || _replace_team=""
+  case "$_replace_team" in
+    y|Y|yes|YES) NEED_TEAM=1 ;;
+    *) NEED_TEAM=0 ;;
+  esac
+elif [ -z "$EXISTING_TEAM" ] && [ -t 0 ]; then
+  NEED_TEAM=1
+else
+  NEED_TEAM=0
+fi
+
+if [ "$NEED_TEAM" -eq 1 ]; then
+  echo ""
+  echo "Linear team ID — either the short team key (e.g., VER, ENG) or the"
+  echo "team UUID (e.g., 07877f05-4f32-42b4-a2df-9e1764316652). Find it in"
+  echo "your Linear team URL or settings."
+  printf "  > "
+  read -r _team_id </dev/tty 2>/dev/null || _team_id=""
+  if [ -n "$_team_id" ]; then
+    # Accept either form:
+    #   short key:  2–20 chars, starts with uppercase letter, alphanumeric + _ -
+    #   team UUID:  8-4-4-4-12 hex digits (case-insensitive)
+    if printf '%s' "$_team_id" | grep -qE '^([A-Z][A-Z0-9_-]{1,19}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'; then
+      config_set linear_team_id "$_team_id"
+      log "  saved linear_team_id=$_team_id"
+    else
+      warn "  invalid team ID format — must be a short team key (e.g., VER)"
+      warn "  or a team UUID (e.g., 07877f05-4f32-42b4-a2df-9e1764316652). Skipping."
+    fi
+  fi
+fi
+
+# ─── Official Linear MCP prompt ────────────────────────────────
+MCP_PRESENT=0
+if command -v claude >/dev/null 2>&1; then
+  if claude mcp list 2>/dev/null | grep -qE '^linear[: ]'; then
+    MCP_PRESENT=1
+  fi
+fi
+
+if [ "$SKIP_MCP_PROMPT" -eq 0 ] && [ "$MCP_PRESENT" -eq 0 ]; then
+  cat <<'EOF'
+
+──────────────────────────────────────────────────────────────────────
+Optional: install Linear's official MCP server for ad-hoc Linear queries.
+Run this in a fresh terminal (not here):
+
+    claude mcp add --transport http linear https://mcp.linear.app/mcp
+
+Linear's MCP authenticates via OAuth in your browser the first time you
+use it — no API key needed for the MCP itself.
+
+linear-sdlc skills do NOT depend on this. They use direct Linear GraphQL
+via the bundled lsdlc-linear helper (which reads LINEAR_API_KEY from the
+env file we just created). The MCP is purely additive — install it if you
+want to ask Claude things like "list my Linear cycles" outside of a skill.
+──────────────────────────────────────────────────────────────────────
+EOF
+fi
+
+# ─── Validation pass ───────────────────────────────────────────
+VALIDATION_OK=1
+for skill_dir in "$SOURCE_DIR"/skills/*/; do
+  [ -f "$skill_dir/SKILL.md" ] || continue
+  if ! grep -q '^name:' "$skill_dir/SKILL.md" 2>/dev/null; then
+    warn "Validation: missing 'name:' in $skill_dir/SKILL.md"
+    VALIDATION_OK=0
+  fi
+done
+if [ "$VALIDATION_OK" -eq 0 ]; then
+  warn "Validation found issues — review the warnings above."
+fi
+
+# ─── Final summary ─────────────────────────────────────────────
+TEAM_DISPLAY="$(config_get linear_team_id)"
+[ -z "$TEAM_DISPLAY" ] && TEAM_DISPLAY="(not set)"
+KEY_DISPLAY="(not set)"
+[ -f "$ENV_FILE" ] && KEY_DISPLAY="$ENV_FILE (mode 0600)"
+MCP_DISPLAY="not installed"
+[ "$MCP_PRESENT" -eq 1 ] && MCP_DISPLAY="installed"
+
+cat <<EOF
+
+linear-sdlc ready.
+  source:       $SOURCE_DIR
+  state:        $STATE_DIR
+  bin:          $LOCAL_BIN/lsdlc-*
+  api key:      $KEY_DISPLAY
+  team id:      $TEAM_DISPLAY
+  official MCP: $MCP_DISPLAY
+
+Try it:  /brainstorm rate limiting
+Update:  cd $SOURCE_DIR && git pull && ./setup
+EOF

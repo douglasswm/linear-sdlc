@@ -25,14 +25,22 @@ allowed-tools:
 Run this first:
 
 ```bash
-_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-_PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
-mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
+# Bootstrap: resolve LINEAR_SDLC_ROOT from this skill's symlink, then source
+# the shared preamble (safe env loader + project detection + session tracking).
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _c in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_c" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_c")")/../.." && pwd)"
+      break
+    fi
+  done
+  [ -z "${LINEAR_SDLC_ROOT:-}" ] && LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || true)"
+  export LINEAR_SDLC_ROOT
+fi
+SKILL_NAME=implement . "$LINEAR_SDLC_ROOT/references/preamble.sh"
 
-echo "BRANCH: $_BRANCH"
-echo "PROJECT: $_SLUG"
-
+# Learnings + wiki + last session (skill-specific display)
 _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
@@ -43,15 +51,12 @@ else
 fi
 
 _WIKI_PAGES=$(find "$_PROJ/wiki" -name "*.md" ! -name "index.md" ! -name "log.md" 2>/dev/null | wc -l | tr -d ' ')
-echo "WIKI: $_WIKI_PAGES pages"
+echo "WIKI: ${_WIKI_PAGES:-0} pages"
 
 if [ -f "$_PROJ/timeline.jsonl" ]; then
   _LAST=$(grep "\"branch\":\"${_BRANCH}\"" "$_PROJ/timeline.jsonl" 2>/dev/null | grep '"event":"completed"' | tail -1)
   [ -n "$_LAST" ] && echo "LAST_SESSION: $_LAST"
 fi
-
-_SESSION_ID="$$-$(date +%s)"
-lsdlc-timeline-log '{"skill":"implement","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -64,38 +69,47 @@ Extract the ticket identifier from the arguments. If no ticket ID is provided, u
 
 ## Step 2: Load Ticket Context
 
-Use the Linear MCP server to fetch the ticket:
-- Title, description, status, priority, labels, assignee
-- If the ticket has a **parent issue**, fetch it too (for feature-level context)
-- If the description references a **spec file** (e.g., `specs/auth-refactor.md`), read it
-- Check for **sub-issues** — if this is a parent, list children and ask which to start with
+Fetch the ticket via the bundled `lsdlc-linear` helper. A single call returns the title, description, status, priority, labels, assignee, parent, sub-issues (children), relations, and recent comments — no follow-up calls needed:
 
-Display a concise ticket summary:
+```bash
+TICKET_ID="VER-42"  # substitute the actual identifier
+TICKET_JSON=$(lsdlc-linear get-issue "$TICKET_ID")
 ```
-TICKET: VER-42 — Refactor auth middleware
-STATUS: Todo | PRIORITY: High | LABELS: backend, security
-PARENT: VER-40 — Auth system overhaul
-DESCRIPTION: <first 3 lines>
+
+Parse and display a concise summary:
+
+```bash
+printf '%s' "$TICKET_JSON" | node -e '
+  const t = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  const labels = (t.labels?.nodes || []).map(l => l.name).join(", ") || "(none)";
+  const parent = t.parent ? `${t.parent.identifier} — ${t.parent.title}` : "(none)";
+  console.log(`TICKET: ${t.identifier} — ${t.title}`);
+  console.log(`STATUS: ${t.state.name} | PRIORITY: ${t.priorityLabel || "None"} | LABELS: ${labels}`);
+  console.log(`PARENT: ${parent}`);
+  console.log("DESCRIPTION:");
+  console.log((t.description || "").split("\n").slice(0, 3).join("\n"));
+'
 ```
+
+If the description references a **spec file** (e.g., `specs/auth-refactor.md`), read it. If `children.nodes` is non-empty, this is a parent — list the children and ask which to start with.
 
 ## Step 3: Pre-flight Checks
 
 Before starting work, verify:
 
-1. **Status check** — Is the ticket already "In Progress" assigned to someone else? If so, warn and ask to proceed.
+1. **Status check** — Is the ticket already "In Progress" assigned to someone else? Read `state.name` and `assignee` from `$TICKET_JSON`. If it's In Progress and assigned to a different user, warn and ask to proceed.
 2. **Branch check** — Does a branch for this ticket already exist?
    - If yes and we're on it: "Continuing existing work on branch `feat/ver-42-auth-refactor`"
    - If yes and we're NOT on it: offer to switch or create a new branch
    - If no: proceed to create branch
-3. **Blocker check** — Does the ticket have dependencies that aren't Done?
-   - If blocked: display blockers, offer to work on a blocker instead or override
+3. **Blocker check** — Does the ticket have dependencies that aren't Done? Parse `relations.nodes[]` from `$TICKET_JSON` — for each relation where `type` is `blocks`, the `relatedIssue.state.name` should be `Done` or `Cancelled`. Display any unresolved blockers and offer to work on a blocker instead or override.
 4. **Working tree check** — Is the working tree clean? If dirty, ask to stash or commit first.
 
 If any check fails critically, report BLOCKED status and exit.
 
 ## Step 4: Start Work
 
-1. **Set status** — Use Linear MCP to set the ticket to "In Progress"
+1. **Set status** — `lsdlc-linear set-status "$TICKET_ID" "In Progress"`
 2. **Create branch** — Derive branch name from ticket:
    ```bash
    # Pattern: feat/{ticket-id-lowercase}-{short-description}
@@ -157,14 +171,16 @@ Launch **parallel sub-agents** (using the Agent tool) for each applicable specia
 
 | Specialist | When to dispatch | Checklist |
 |-----------|-----------------|-----------|
-| **Testing** | Always | Read `implement/specialists/testing.md` |
-| **Security** | When diff touches auth, API, input handling, or env files | Read `implement/specialists/security.md` |
-| **Performance** | When diff touches DB queries, API endpoints, loops, or data processing | Read `implement/specialists/performance.md` |
-| **Code Quality** | Always | Read `implement/specialists/code-quality.md` |
+| **Testing** | Always | `$LINEAR_SDLC_ROOT/skills/implement/specialists/testing.md` |
+| **Security** | When diff touches auth, API, input handling, or env files | `$LINEAR_SDLC_ROOT/skills/implement/specialists/security.md` |
+| **Performance** | When diff touches DB queries, API endpoints, loops, or data processing | `$LINEAR_SDLC_ROOT/skills/implement/specialists/performance.md` |
+| **Code Quality** | Always | `$LINEAR_SDLC_ROOT/skills/implement/specialists/code-quality.md` |
+
+`$LINEAR_SDLC_ROOT` is exported by the preamble. Read the file in the parent skill turn (you have file-system access), then pass its contents inline in the sub-agent's prompt — sub-agents have their own working directory and won't be able to resolve a relative path.
 
 Each sub-agent receives:
 - The full `git diff` output
-- The specialist checklist from the corresponding file
+- The specialist checklist content (read by the parent skill from `$LINEAR_SDLC_ROOT/skills/implement/specialists/<name>.md` and embedded in the prompt)
 - Instructions to return findings as structured JSON
 
 ### 7c: Collect and present findings
@@ -271,7 +287,7 @@ Respect the user's choice — this is a nudge, not a gate.
    )"
    ```
 
-3. **Update Linear** — Use MCP to set ticket status to "In Review"
+3. **Update Linear** — `lsdlc-linear set-status "$TICKET_ID" "In Review"`
 
 ## Step 9: Wrap Up
 

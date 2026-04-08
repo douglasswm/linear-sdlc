@@ -26,11 +26,15 @@ Not every task needs the most powerful model. Skills declare which Claude model 
 
 ## Verification Before Completion
 
-Claims of "done", "fixed", or "passing" must be grounded in fresh evidence — not in memory of what the conversation said three turns ago. `/linear-sdlc:implement`, `/linear-sdlc:checkpoint`, and `/linear-sdlc:health` run their verification commands at the moment of reporting and cite the literal output. See `references/verification-gate.md` for the pattern.
+Claims of "done", "fixed", or "passing" must be grounded in fresh evidence — not in memory of what the conversation said three turns ago. `/implement`, `/checkpoint`, and `/health` run their verification commands at the moment of reporting and cite the literal output. See `references/verification-gate.md` for the pattern.
 
 ## Debugging Discipline
 
-`/linear-sdlc:debug` focuses on phase-1 diagnostic rigor: reproduce, identify component boundaries, instrument, observe, and only then hypothesize the root cause. The goal is to pinpoint the first boundary where data becomes wrong, not to guess from the crash site. The invariant "observe before fixing" is a soft recommendation, not an iron law — User Sovereignty still applies.
+`/debug` focuses on phase-1 diagnostic rigor: reproduce, identify component boundaries, instrument, observe, and only then hypothesize the root cause. The goal is to pinpoint the first boundary where data becomes wrong, not to guess from the crash site. The invariant "observe before fixing" is a soft recommendation, not an iron law — User Sovereignty still applies.
+
+## Depend on Official Integrations
+
+When Anthropic or a vendor (e.g., Linear) ships a first-party tool, prefer pointing users at the vendor's standard install mechanism over embedding our own copy. Embedding creates maintenance burden, version skew, and brittle interpolation against whatever Claude Code's config schema looks like this month. linear-sdlc instructs users to install Linear's official HTTP MCP server separately (`claude mcp add --transport http linear https://mcp.linear.app/mcp`) and uses direct GraphQL via `bin/lsdlc-linear` for everything skills actually need. The MCP is a nice-to-have for ad-hoc Linear queries; the skills don't depend on it.
 
 ## Simplicity
 

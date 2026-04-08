@@ -19,14 +19,22 @@ allowed-tools:
 Run this first:
 
 ```bash
-_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-_PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
-mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
+# Bootstrap: resolve LINEAR_SDLC_ROOT from this skill's symlink, then source
+# the shared preamble (safe env loader + project detection + session tracking).
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _c in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_c" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_c")")/../.." && pwd)"
+      break
+    fi
+  done
+  [ -z "${LINEAR_SDLC_ROOT:-}" ] && LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || true)"
+  export LINEAR_SDLC_ROOT
+fi
+SKILL_NAME=next . "$LINEAR_SDLC_ROOT/references/preamble.sh"
 
-echo "BRANCH: $_BRANCH"
-echo "PROJECT: $_SLUG"
-
+# Learnings (skill-specific display)
 _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
@@ -36,33 +44,54 @@ else
   echo "LEARNINGS: 0"
 fi
 
-_SESSION_ID="$$-$(date +%s)"
-lsdlc-timeline-log '{"skill":"next","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
-
 echo "---"
 ```
 
 ## Step 1: Check for In-Progress Work
 
-Before suggesting new work, check if there's already something in flight:
+Before suggesting new work, check if there's already something in flight via the bundled `lsdlc-linear` helper:
 
-1. Use Linear MCP to search for tickets assigned to "me" with status "In Progress"
-2. If any exist, present them first:
-   ```
-   You have work in progress:
-   - VER-42: Auth middleware refactor (In Progress, branch: feat/ver-42-auth-refactor)
+```bash
+TEAM=$(lsdlc-config get linear_team_id)
+[ -n "$TEAM" ] && TEAM_FLAG="--team $TEAM" || TEAM_FLAG=""
+lsdlc-linear list-assigned $TEAM_FLAG --status "In Progress" --limit 10
+```
 
-   Continue this work, or pick something new?
-   ```
-3. If user wants to continue, suggest `/implement VER-42`
+The output is JSON with `count` and `issues[]`. If any exist, present them first:
+
+```
+You have work in progress:
+- VER-42: Auth middleware refactor (In Progress)
+
+Continue this work, or pick something new?
+```
+
+If user wants to continue, suggest `/implement VER-42`.
 
 ## Step 2: Query Linear for Candidates
 
-Use the Linear MCP server to fetch tickets:
+Fetch unstarted assigned tickets:
 
-1. **Get my assigned tickets** with status: Todo, Backlog
-2. **Get team ID** from config: `lsdlc-config get linear_team_id`
-3. If user provides filters (project, cycle, label), apply them
+```bash
+TEAM=$(lsdlc-config get linear_team_id)
+[ -n "$TEAM" ] && TEAM_FLAG="--team $TEAM" || TEAM_FLAG=""
+lsdlc-linear list-assigned $TEAM_FLAG --status "Todo,Backlog" --limit 20
+```
+
+Parse the JSON to extract identifier, title, priority, priorityLabel, state, labels, cycle, createdAt for ranking in Step 3:
+
+```bash
+lsdlc-linear list-assigned $TEAM_FLAG --status "Todo,Backlog" --limit 20 | node -e '
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  for (const i of data.issues) {
+    const labels = (i.labels?.nodes || []).map(l => l.name).join(",");
+    const cycle = i.cycle?.name || "";
+    console.log([i.identifier, i.priorityLabel, i.title, labels, cycle].join("\t"));
+  }
+'
+```
+
+If user provides filters (project, cycle, label) in their prompt, narrow the results in your post-processing — Linear's filter syntax for these is more elaborate than the simple flags `lsdlc-linear` exposes.
 
 ## Step 3: Filter and Rank
 

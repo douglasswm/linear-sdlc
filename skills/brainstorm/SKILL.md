@@ -23,14 +23,22 @@ allowed-tools:
 Run this first:
 
 ```bash
-_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-_PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
-mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
+# Bootstrap: resolve LINEAR_SDLC_ROOT from this skill's symlink, then source
+# the shared preamble (safe env loader + project detection + session tracking).
+if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
+  for _c in "$HOME/.claude/skills/brainstorm/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_c" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_c")")/../.." && pwd)"
+      break
+    fi
+  done
+  [ -z "${LINEAR_SDLC_ROOT:-}" ] && LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || true)"
+  export LINEAR_SDLC_ROOT
+fi
+SKILL_NAME=brainstorm . "$LINEAR_SDLC_ROOT/references/preamble.sh"
 
-echo "BRANCH: $_BRANCH"
-echo "PROJECT: $_SLUG"
-
+# Learnings (skill-specific display)
 _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
@@ -39,9 +47,6 @@ if [ -f "$_LEARN_FILE" ]; then
 else
   echo "LEARNINGS: 0"
 fi
-
-_SESSION_ID="$$-$(date +%s)"
-lsdlc-timeline-log '{"skill":"brainstorm","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -59,9 +64,27 @@ If no topic was provided, use AskUserQuestion:
 
 ## Step 2: Search for Duplicates
 
-Use the Linear MCP server to search for existing issues related to the topic:
+Search Linear for existing issues related to the topic via the bundled `lsdlc-linear` helper (direct GraphQL — no MCP needed):
+
+```bash
+TOPIC="rate limiting"  # substitute the actual topic
+lsdlc-linear search-issues "$TOPIC" --limit 10
+```
+
+The output is JSON with `count` and `issues[]`. Parse it inline if you need specific fields:
+
+```bash
+TOPIC="rate limiting"
+lsdlc-linear search-issues "$TOPIC" --limit 10 | node -e '
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  for (const i of data.issues) {
+    console.log(`${i.identifier}\t${i.state.name}\t${i.title}`);
+  }
+'
+```
+
 - Search by keywords from the topic
-- Check for both open and closed issues
+- Linear's full-text search covers open and closed issues by default
 
 If similar tickets exist, present them:
 ```
@@ -154,7 +177,7 @@ Create the spec file:
 
 1. Create `specs/` directory if it doesn't exist: `mkdir -p specs`
 2. Generate a slug from the topic: `echo "rate-limiting" | tr ' ' '-' | tr -cd 'a-z0-9-'`
-3. Read the template: `${CLAUDE_PLUGIN_ROOT}/templates/spec-template.md`
+3. Read the template: `$LINEAR_SDLC_ROOT/templates/spec-template.md` (set by the preamble)
 4. Fill in the template with the discussion results
 5. Write to `specs/{slug}.md`
 

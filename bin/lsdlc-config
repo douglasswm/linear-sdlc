@@ -4,6 +4,7 @@
 # Usage:
 #   lsdlc-config get <key>          — read a config value
 #   lsdlc-config set <key> <value>  — write a config value
+#   lsdlc-config unset <key>        — remove a key (no-op if absent)
 #   lsdlc-config list               — show all config
 #
 # Env overrides (for testing):
@@ -44,6 +45,24 @@ case "${1:-}" in
       fs.writeFileSync(file, JSON.stringify(c, null, 2) + '\n');
     " "$KEY" "$VALUE"
     ;;
+  unset)
+    KEY="${2:?Usage: lsdlc-config unset <key>}"
+    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+$'; then
+      echo "Error: key must contain only alphanumeric characters and underscores" >&2
+      exit 1
+    fi
+    [ -f "$CONFIG_FILE" ] || exit 0
+    node -e "
+      const fs = require('fs');
+      const file = '$CONFIG_FILE';
+      let c = {};
+      try { c = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { process.exit(0); }
+      if (Object.prototype.hasOwnProperty.call(c, process.argv[1])) {
+        delete c[process.argv[1]];
+        fs.writeFileSync(file, JSON.stringify(c, null, 2) + '\n');
+      }
+    " "$KEY"
+    ;;
   list)
     if [ -f "$CONFIG_FILE" ]; then
       cat "$CONFIG_FILE"
@@ -52,7 +71,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: lsdlc-config {get|set|list} [key] [value]"
+    echo "Usage: lsdlc-config {get|set|unset|list} [key] [value]"
     exit 1
     ;;
 esac
