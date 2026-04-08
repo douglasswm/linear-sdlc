@@ -44,5 +44,5 @@ QUESTION: <specific question for the user>
 After reporting status, log the completion event:
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"SKILL_NAME","event":"completed","branch":"BRANCH","outcome":"STATUS","session":"SESSION_ID"}' 2>/dev/null
+lsdlc-timeline-log '{"skill":"SKILL_NAME","event":"completed","branch":"BRANCH","outcome":"STATUS","session":"SESSION_ID"}' 2>/dev/null
 ```

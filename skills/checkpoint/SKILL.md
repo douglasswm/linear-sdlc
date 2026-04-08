@@ -6,6 +6,7 @@ description: |
   Use when: "checkpoint", "save progress", "where was I", "resume".
 model: sonnet
 effort: low
+argument-hint: "[resume]"
 allowed-tools:
   - Bash
   - Read
@@ -22,7 +23,7 @@ Run this first:
 
 ```bash
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(~/.claude/skills/linear-sdlc/bin/lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
 mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
 
@@ -38,7 +39,7 @@ if [ "$_CP_COUNT" -gt 0 ]; then
 fi
 
 _SESSION_ID="$$-$(date +%s)"
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"checkpoint","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+lsdlc-timeline-log '{"skill":"checkpoint","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -250,5 +251,5 @@ Present as a table, and offer to resume or delete old ones.
 ## Wrap Up
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"checkpoint","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","mode":"save|resume","session":"'"$_SESSION_ID"'"}' 2>/dev/null
+lsdlc-timeline-log '{"skill":"checkpoint","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","mode":"save|resume","session":"'"$_SESSION_ID"'"}' 2>/dev/null
 ```

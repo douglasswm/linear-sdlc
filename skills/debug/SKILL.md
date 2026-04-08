@@ -6,6 +6,7 @@ description: |
   Use when: "debug", "why is this broken", "investigate bug", "test is failing".
 model: sonnet
 effort: medium
+argument-hint: "[bug summary]"
 allowed-tools:
   - Bash
   - Read
@@ -26,7 +27,7 @@ Run this first:
 
 ```bash
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(~/.claude/skills/linear-sdlc/bin/lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
 mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
 
@@ -37,13 +38,13 @@ _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
   echo "LEARNINGS: $_LEARN_COUNT entries"
-  [ "$_LEARN_COUNT" -gt 0 ] && ~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-search --limit 3 2>/dev/null || true
+  [ "$_LEARN_COUNT" -gt 0 ] && lsdlc-learnings-search --limit 3 2>/dev/null || true
 else
   echo "LEARNINGS: 0"
 fi
 
 _SESSION_ID="$$-$(date +%s)"
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"debug","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+lsdlc-timeline-log '{"skill":"debug","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -107,7 +108,7 @@ If the user picks option 1, apply the fix. Remove the instrumentation added in S
 **Recommendation, not mandate:** don't propose fixes during Steps 1-4. If you feel the urge to jump ahead — because it "looks obvious" — note it as a candidate, log a learning about the temptation if it felt strong, and finish gathering evidence first. The user can override at any point.
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-log '{"skill":"debug","type":"operational","key":"premature-fix-urge","insight":"Felt tempted to jump to fix at boundary X before completing observation; evidence later showed the bug was at boundary Y","confidence":3,"source":"observed"}'
+lsdlc-learnings-log '{"skill":"debug","type":"operational","key":"premature-fix-urge","insight":"Felt tempted to jump to fix at boundary X before completing observation; evidence later showed the bug was at boundary Y","confidence":3,"source":"observed"}'
 ```
 
 ## Step 7: Log Learnings
@@ -115,7 +116,7 @@ If the user picks option 1, apply the fix. Remove the instrumentation added in S
 If the investigation revealed something non-obvious about the project — a hidden coupling, a misleading error message, a wrong assumption baked into a comment — log it:
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-log '{"skill":"debug","type":"TYPE","key":"KEY","insight":"INSIGHT","confidence":N,"source":"observed"}'
+lsdlc-learnings-log '{"skill":"debug","type":"TYPE","key":"KEY","insight":"INSIGHT","confidence":N,"source":"observed"}'
 ```
 
 Types: `operational`, `pitfall`, `convention`, `dependency`, `architecture`.
@@ -123,7 +124,7 @@ Types: `operational`, `pitfall`, `convention`, `dependency`, `architecture`.
 ## Wrap Up
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"debug","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","session":"'"$_SESSION_ID"'"}' 2>/dev/null
+lsdlc-timeline-log '{"skill":"debug","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","session":"'"$_SESSION_ID"'"}' 2>/dev/null
 ```
 
 ```

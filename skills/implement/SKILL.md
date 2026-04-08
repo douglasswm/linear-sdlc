@@ -6,6 +6,7 @@ description: |
   Use when: "implement VER-42", "work on ticket", "start VER-", "build this ticket".
 model: sonnet
 effort: medium
+argument-hint: "[ticket-id]"
 allowed-tools:
   - Bash
   - Read
@@ -25,7 +26,7 @@ Run this first:
 
 ```bash
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(~/.claude/skills/linear-sdlc/bin/lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
 mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
 
@@ -36,7 +37,7 @@ _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
   echo "LEARNINGS: $_LEARN_COUNT entries"
-  [ "$_LEARN_COUNT" -gt 0 ] && ~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-search --limit 5 2>/dev/null || true
+  [ "$_LEARN_COUNT" -gt 0 ] && lsdlc-learnings-search --limit 5 2>/dev/null || true
 else
   echo "LEARNINGS: 0"
 fi
@@ -50,7 +51,7 @@ if [ -f "$_PROJ/timeline.jsonl" ]; then
 fi
 
 _SESSION_ID="$$-$(date +%s)"
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"implement","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+lsdlc-timeline-log '{"skill":"implement","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -132,7 +133,7 @@ This is where the actual coding happens. The human and Claude collaborate to imp
   ```
 - If you discover something non-obvious about the project, log a learning:
   ```bash
-  ~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-log '{"skill":"implement","type":"TYPE","key":"KEY","insight":"INSIGHT","confidence":N,"source":"observed"}'
+  lsdlc-learnings-log '{"skill":"implement","type":"TYPE","key":"KEY","insight":"INSIGHT","confidence":N,"source":"observed"}'
   ```
 - If you encounter a blocker or the requirements are unclear, use AskUserQuestion
 
@@ -285,7 +286,7 @@ Respect the user's choice — this is a nudge, not a gate.
 
 2. **Log completion:**
    ```bash
-   ~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"implement","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","ticket":"VER-42","pr":"PR_URL","session":"'"$_SESSION_ID"'"}' 2>/dev/null
+   lsdlc-timeline-log '{"skill":"implement","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","ticket":"VER-42","pr":"PR_URL","session":"'"$_SESSION_ID"'"}' 2>/dev/null
    ```
 
 3. **Log any learnings** discovered during implementation

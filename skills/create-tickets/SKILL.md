@@ -6,6 +6,7 @@ description: |
   "break this down into tickets".
 model: sonnet
 effort: medium
+argument-hint: "[path/to/spec.md]"
 allowed-tools:
   - Bash
   - Read
@@ -21,7 +22,7 @@ Run this first:
 
 ```bash
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(~/.claude/skills/linear-sdlc/bin/lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
 mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
 
@@ -32,13 +33,13 @@ _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
   echo "LEARNINGS: $_LEARN_COUNT entries"
-  [ "$_LEARN_COUNT" -gt 0 ] && ~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-search --limit 3 2>/dev/null || true
+  [ "$_LEARN_COUNT" -gt 0 ] && lsdlc-learnings-search --limit 3 2>/dev/null || true
 else
   echo "LEARNINGS: 0"
 fi
 
 _SESSION_ID="$$-$(date +%s)"
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"create-tickets","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+lsdlc-timeline-log '{"skill":"create-tickets","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -131,7 +132,7 @@ Use AskUserQuestion:
 
 ## Step 4: Create in Linear
 
-Get the team ID: `~/.claude/skills/linear-sdlc/bin/lsdlc-config get linear_team_id`
+Get the team ID: `lsdlc-config get linear_team_id`
 
 For each ticket, use the Linear MCP server:
 
@@ -174,7 +175,7 @@ Present the created tickets:
 ## Step 6: Wrap Up
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"create-tickets","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","tickets_created":4,"parent":"VER-60","session":"'"$_SESSION_ID"'"}' 2>/dev/null
+lsdlc-timeline-log '{"skill":"create-tickets","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","tickets_created":4,"parent":"VER-60","session":"'"$_SESSION_ID"'"}' 2>/dev/null
 ```
 
 ```

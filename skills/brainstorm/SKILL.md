@@ -6,6 +6,7 @@ description: |
   "explore an idea".
 model: opus
 effort: medium
+argument-hint: "[feature topic]"
 allowed-tools:
   - Bash
   - Read
@@ -23,7 +24,7 @@ Run this first:
 
 ```bash
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(~/.claude/skills/linear-sdlc/bin/lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
 mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
 
@@ -34,13 +35,13 @@ _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
   echo "LEARNINGS: $_LEARN_COUNT entries"
-  [ "$_LEARN_COUNT" -gt 0 ] && ~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-search --limit 3 2>/dev/null || true
+  [ "$_LEARN_COUNT" -gt 0 ] && lsdlc-learnings-search --limit 3 2>/dev/null || true
 else
   echo "LEARNINGS: 0"
 fi
 
 _SESSION_ID="$$-$(date +%s)"
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"brainstorm","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+lsdlc-timeline-log '{"skill":"brainstorm","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -153,7 +154,7 @@ Create the spec file:
 
 1. Create `specs/` directory if it doesn't exist: `mkdir -p specs`
 2. Generate a slug from the topic: `echo "rate-limiting" | tr ' ' '-' | tr -cd 'a-z0-9-'`
-3. Read the template: `~/.claude/skills/linear-sdlc/templates/spec-template.md`
+3. Read the template: `${CLAUDE_PLUGIN_ROOT}/templates/spec-template.md`
 4. Fill in the template with the discussion results
 5. Write to `specs/{slug}.md`
 
@@ -177,7 +178,7 @@ After the spec is finalized:
 ## Step 7: Wrap Up
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"brainstorm","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","spec":"specs/SLUG.md","session":"'"$_SESSION_ID"'"}' 2>/dev/null
+lsdlc-timeline-log '{"skill":"brainstorm","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","spec":"specs/SLUG.md","session":"'"$_SESSION_ID"'"}' 2>/dev/null
 ```
 
 ```

@@ -26,11 +26,11 @@ Not every task needs the most powerful model. Skills declare which Claude model 
 
 ## Verification Before Completion
 
-Claims of "done", "fixed", or "passing" must be grounded in fresh evidence — not in memory of what the conversation said three turns ago. `/implement`, `/checkpoint`, and `/health` run their verification commands at the moment of reporting and cite the literal output. See `references/verification-gate.md` for the pattern.
+Claims of "done", "fixed", or "passing" must be grounded in fresh evidence — not in memory of what the conversation said three turns ago. `/linear-sdlc:implement`, `/linear-sdlc:checkpoint`, and `/linear-sdlc:health` run their verification commands at the moment of reporting and cite the literal output. See `references/verification-gate.md` for the pattern.
 
 ## Debugging Discipline
 
-`/debug` focuses on phase-1 diagnostic rigor: reproduce, identify component boundaries, instrument, observe, and only then hypothesize the root cause. The goal is to pinpoint the first boundary where data becomes wrong, not to guess from the crash site. The invariant "observe before fixing" is a soft recommendation, not an iron law — User Sovereignty still applies.
+`/linear-sdlc:debug` focuses on phase-1 diagnostic rigor: reproduce, identify component boundaries, instrument, observe, and only then hypothesize the root cause. The goal is to pinpoint the first boundary where data becomes wrong, not to guess from the crash site. The invariant "observe before fixing" is a soft recommendation, not an iron law — User Sovereignty still applies.
 
 ## Simplicity
 

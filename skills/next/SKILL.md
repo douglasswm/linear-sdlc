@@ -20,7 +20,7 @@ Run this first:
 
 ```bash
 _BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-_SLUG=$(~/.claude/skills/linear-sdlc/bin/lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+_SLUG=$(lsdlc-slug 2>/dev/null | grep '^SLUG=' | cut -d= -f2 || basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
 _PROJ="${HOME}/.linear-sdlc/projects/${_SLUG}"
 mkdir -p "$_PROJ/checkpoints" "$_PROJ/wiki"
 
@@ -31,13 +31,13 @@ _LEARN_FILE="$_PROJ/learnings.jsonl"
 if [ -f "$_LEARN_FILE" ]; then
   _LEARN_COUNT=$(wc -l < "$_LEARN_FILE" | tr -d ' ')
   echo "LEARNINGS: $_LEARN_COUNT entries"
-  [ "$_LEARN_COUNT" -gt 0 ] && ~/.claude/skills/linear-sdlc/bin/lsdlc-learnings-search --limit 3 2>/dev/null || true
+  [ "$_LEARN_COUNT" -gt 0 ] && lsdlc-learnings-search --limit 3 2>/dev/null || true
 else
   echo "LEARNINGS: 0"
 fi
 
 _SESSION_ID="$$-$(date +%s)"
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"next","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+lsdlc-timeline-log '{"skill":"next","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 
 echo "---"
 ```
@@ -61,7 +61,7 @@ Before suggesting new work, check if there's already something in flight:
 Use the Linear MCP server to fetch tickets:
 
 1. **Get my assigned tickets** with status: Todo, Backlog
-2. **Get team ID** from config: `~/.claude/skills/linear-sdlc/bin/lsdlc-config get linear_team_id`
+2. **Get team ID** from config: `lsdlc-config get linear_team_id`
 3. If user provides filters (project, cycle, label), apply them
 
 ## Step 3: Filter and Rank
@@ -116,7 +116,7 @@ If "None of these": ask what they'd like to work on instead.
 ## Step 6: Wrap Up
 
 ```bash
-~/.claude/skills/linear-sdlc/bin/lsdlc-timeline-log '{"skill":"next","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","selected":"VER-45","session":"'"$_SESSION_ID"'"}' 2>/dev/null
+lsdlc-timeline-log '{"skill":"next","event":"completed","branch":"'"$_BRANCH"'","outcome":"DONE","selected":"VER-45","session":"'"$_SESSION_ID"'"}' 2>/dev/null
 ```
 
 ```
