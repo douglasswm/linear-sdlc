@@ -209,8 +209,12 @@ echo '<FINDINGS_JSON>' >> "$_PROJ/$(echo $_BRANCH | tr '/' '-')-reviews.jsonl"
 Before creating the PR, scan the diff for placeholders and verify acceptance-criteria coverage. This is **advisory, not blocking** — the user decides how to proceed when something is flagged.
 
 ```bash
-# Placeholder / TODO scan (warn only)
-git diff "$BASE_BRANCH"...HEAD | grep -nE '(TODO|FIXME|XXX|<placeholder>|<PLACEHOLDER>)' \
+# Re-derive BASE_BRANCH — shell state doesn't persist across bash tool calls,
+# so Step 7a's assignment isn't in scope here.
+BASE_BRANCH=$(git rev-parse --verify development 2>/dev/null && echo development || git rev-parse --verify dev 2>/dev/null && echo dev || echo main)
+
+# Placeholder / TODO scan — only match ADDED lines (prefix +), not removed ones.
+git diff "$BASE_BRANCH"...HEAD | grep -E '^\+.*(TODO|FIXME|XXX|<placeholder>|<PLACEHOLDER>)' \
   || echo "  (no placeholders)"
 ```
 

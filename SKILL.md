@@ -3,7 +3,8 @@ name: linear-sdlc
 description: |
   Linear SDLC workflow for Claude Code. Provides ticket-driven development
   with brainstorming, ticket creation, implementation, specialist reviews,
-  checkpoints, and health monitoring — all powered by the Linear MCP server.
+  debugging, checkpoints, and health monitoring — all powered by the Linear
+  MCP server.
 model: sonnet
 effort: medium
 allowed-tools:
