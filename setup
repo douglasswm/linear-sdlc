@@ -78,7 +78,30 @@ LINEAR_API_KEY="$LINEAR_API_KEY" SETTINGS_PATH="$SETTINGS" node -e "
   };
   fs.writeFileSync(file, JSON.stringify(s, null, 2) + '\n');
 "
-echo "  MCP server configured in $SETTINGS"
+
+# 3b. Restrict permissions on settings.json — it contains the Linear API key in
+# plaintext. Best-effort: any failure is silently ignored so we never block the
+# install on a filesystem that doesn't support POSIX permissions or NTFS ACLs.
+#
+# POSIX (macOS, Linux, WSL on a Linux-native filesystem): chmod 600 is enough.
+chmod 600 "$SETTINGS" 2>/dev/null || true
+
+# Windows (Git Bash / MSYS2 / Cygwin): chmod is a no-op on NTFS, so also set an
+# explicit NTFS ACL via icacls.exe — remove inherited ACEs and grant full
+# control to the current user only. WSL targeting a /mnt/c path is a known gap
+# (neither branch below matches). Native cmd/PowerShell can't run this script
+# at all (bash shebang), so they're out of scope.
+case "$(uname -s 2>/dev/null)" in
+  CYGWIN*|MINGW*|MSYS*)
+    if command -v icacls.exe >/dev/null 2>&1; then
+      _WIN_SETTINGS="$SETTINGS"
+      command -v cygpath >/dev/null 2>&1 && _WIN_SETTINGS=$(cygpath -w "$SETTINGS" 2>/dev/null || echo "$SETTINGS")
+      icacls.exe "$_WIN_SETTINGS" /inheritance:r /grant:r "$(whoami):F" >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+echo "  MCP server configured in $SETTINGS (permissions restricted)"
 
 # 4. Create state directory
 mkdir -p "$HOME/.linear-sdlc/projects"

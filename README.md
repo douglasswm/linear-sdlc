@@ -39,8 +39,11 @@ cd ~/.claude/skills/linear-sdlc && ./setup
 
 1. **Checks dependencies** — Verifies `node`, `gh`, and `git` are installed
 2. **Configures the Linear MCP server** — Merges `@anthropic-ai/linear-mcp-server` into `~/.claude/settings.json` with your API key
-3. **Creates the state directory** — `~/.linear-sdlc/` for learnings, timeline, checkpoints
-4. **Registers skills** — Creates symlinks in `~/.claude/skills/` so Claude Code discovers `/brainstorm`, `/create-tickets`, `/next`, `/implement`, `/checkpoint`, `/health`
+3. **Restricts file permissions on `settings.json`** — Sets mode `0600` (owner-only read/write) on POSIX systems so other local users and processes can't read your API key. On Windows under Git Bash / MSYS / Cygwin, also sets an explicit NTFS ACL via `icacls` granting full control to your user only. Silent no-op on filesystems that don't support either (e.g., WSL targeting a `/mnt/c` path — see the note below).
+4. **Creates the state directory** — `~/.linear-sdlc/` for learnings, timeline, checkpoints
+5. **Registers skills** — Creates symlinks in `~/.claude/skills/` so Claude Code discovers `/brainstorm`, `/create-tickets`, `/next`, `/implement`, `/checkpoint`, `/health`
+
+> **Platform note:** On macOS, Linux, and WSL (Linux-native home), step 3 uses `chmod 600`. On Windows Git Bash / MSYS / Cygwin it also runs `icacls /inheritance:r /grant:r <you>:F`. If you run `setup` under WSL but target a Windows-side path (`/mnt/c/...`), neither path applies and your `settings.json` will keep its default NTFS ACL — use Git Bash or run `icacls` manually if you need it locked down.
 
 ### Verify installation
 

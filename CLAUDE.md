@@ -54,4 +54,16 @@ Slug is derived from the git remote. Each repo gets isolated state.
 
 ## Security posture
 
-`~/.claude/settings.json` currently ships with `-rw-r--r--` (644) permissions from the user's existing Claude Code install. That's world-readable on the local machine — acceptable for a personal dev laptop, not great. Open improvement: have `setup` `chmod 600 "$SETTINGS"` after writing. Not yet done.
+`setup` restricts `~/.claude/settings.json` to owner-only access after writing it — `chmod 600` on POSIX, `icacls /inheritance:r /grant:r <user>:F` on Windows (Git Bash / MSYS / Cygwin). Both calls are best-effort (`|| true`) so unusual filesystems don't block install.
+
+**Known gaps in the permission lockdown:**
+- WSL targeting a `/mnt/c/...` path: `chmod` is a no-op on the NTFS interop mount and the `icacls` branch doesn't match (WSL's `uname -s` is `Linux`). The file keeps its default NTFS ACL. Document in README, don't paper over.
+- Native Windows PowerShell / cmd: can't run the script at all (bash shebang). Out of scope.
+
+**What the permission fix does NOT protect against:**
+- Anything running as the same user (malware, backup daemons like Time Machine/Dropbox/iCloud that run under your UID, Claude Code itself).
+- Root.
+- Disk theft on an unencrypted drive — FileVault/BitLocker is the answer there, not file perms.
+- The API key appearing in the Claude Code tool-call transcript when the one-liner install is used (already disclosed in README's "Privacy note").
+
+The key is still plaintext at rest. The fix closes the cheapest exfiltration path (local-user-to-local-user read), nothing more.
