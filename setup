@@ -24,12 +24,15 @@ SKILL_PREFIX=0
 SKILL_PREFIX_FLAG=0
 SKIP_API_KEY=0
 SKIP_MCP_PROMPT=0
+TEAM_MODE_FLAG=""  # "" | "on" | "off"
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix)         SKILL_PREFIX=1; SKILL_PREFIX_FLAG=1; shift ;;
     --no-prefix)      SKILL_PREFIX=0; SKILL_PREFIX_FLAG=1; shift ;;
     --skip-api-key)   SKIP_API_KEY=1; shift ;;
     --skip-mcp-prompt) SKIP_MCP_PROMPT=1; shift ;;
+    --team)           TEAM_MODE_FLAG="on"; shift ;;
+    --no-team)        TEAM_MODE_FLAG="off"; shift ;;
     -q|--quiet)       QUIET=1; shift ;;
     -h|--help)
       cat <<'EOF'
@@ -40,6 +43,12 @@ Flags:
   --no-prefix       Use short skill names (/brainstorm) — default
   --skip-api-key    Don't prompt for the Linear API key
   --skip-mcp-prompt Don't print the official Linear MCP install hint
+  --team            Enable team mode: set auto_upgrade=true + team_mode=true and
+                    register a SessionStart hook in ~/.claude/settings.json that
+                    silently fetches the latest linear-sdlc at session start
+                    (throttled to once per hour, never blocks startup).
+  --no-team         Disable team mode: unset auto_upgrade + team_mode and remove
+                    the SessionStart hook.
   -q, --quiet       Suppress informational logs
   -h, --help        Show this message
 EOF
@@ -288,6 +297,38 @@ case ":$PATH:" in
     ;;
 esac
 
+# ─── Team mode (SessionStart hook wiring) ─────────────────────
+# Opt-in background auto-updater. Gated behind an explicit flag because it
+# touches ~/.claude/settings.json and writes an always-on hook. The worker
+# script self-gates on `team_mode: true` + `update_check != false`, so even
+# after the hook is registered the user can still disable it via lsdlc-config
+# without editing settings.json.
+SESSION_UPDATE_BIN="$LOCAL_BIN/lsdlc-session-update"
+SETTINGS_HOOK_BIN="$SOURCE_DIR/bin/lsdlc-settings-hook"
+
+if [ "$TEAM_MODE_FLAG" = "on" ]; then
+  if [ ! -x "$SESSION_UPDATE_BIN" ] || [ ! -x "$SETTINGS_HOOK_BIN" ]; then
+    warn "team mode: session-update / settings-hook bins missing — skipping"
+  else
+    config_set team_mode true
+    config_set auto_upgrade true
+    if "$SETTINGS_HOOK_BIN" add "$SESSION_UPDATE_BIN"; then
+      log "  team mode ENABLED — SessionStart hook registered at $SESSION_UPDATE_BIN"
+      log "  to disable: ./setup --no-team"
+    else
+      warn "team mode: failed to register SessionStart hook — check ~/.claude/settings.json"
+    fi
+  fi
+elif [ "$TEAM_MODE_FLAG" = "off" ]; then
+  # Unset config flags and strip the hook regardless of whether it was ours.
+  LSDLC_STATE_DIR="$STATE_DIR" "$LSDLC_CONFIG" unset team_mode 2>/dev/null || true
+  LSDLC_STATE_DIR="$STATE_DIR" "$LSDLC_CONFIG" unset auto_upgrade 2>/dev/null || true
+  if [ -x "$SETTINGS_HOOK_BIN" ]; then
+    "$SETTINGS_HOOK_BIN" remove "$SESSION_UPDATE_BIN" 2>/dev/null || true
+  fi
+  log "  team mode DISABLED — SessionStart hook removed"
+fi
+
 # ─── Linear API key prompt ─────────────────────────────────────
 ENV_FILE="$STATE_DIR/env"
 if [ "$SKIP_API_KEY" -eq 0 ]; then
@@ -425,6 +466,22 @@ want to ask Claude things like "list my Linear cycles" outside of a skill.
 EOF
 fi
 
+# ─── Seed the update-check cache on fresh install ─────────────
+# Without this, the first skill invocation after install would make a cold
+# network request to raw.githubusercontent.com. Seed the cache as UP_TO_DATE
+# against the version file we just shipped, so the first run is offline-safe.
+# On re-runs, we only touch the cache if it's missing (don't suppress a real
+# nag that's already sitting there waiting to be shown).
+UPDATE_CACHE_FILE="$STATE_DIR/last-update-check"
+if [ -f "$SOURCE_DIR/VERSION" ] && [ ! -f "$UPDATE_CACHE_FILE" ]; then
+  _LOCAL_VER="$(head -n1 "$SOURCE_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$_LOCAL_VER" ]; then
+    printf 'UP_TO_DATE %s %s %s\n' "$_LOCAL_VER" "$_LOCAL_VER" "$(date +%s)" \
+      > "$UPDATE_CACHE_FILE"
+    log "  seeded update cache (v$_LOCAL_VER)"
+  fi
+fi
+
 # ─── Validation pass ───────────────────────────────────────────
 VALIDATION_OK=1
 for skill_dir in "$SOURCE_DIR"/skills/*/; do
@@ -446,16 +503,34 @@ KEY_DISPLAY="(not set)"
 MCP_DISPLAY="not installed"
 [ "$MCP_PRESENT" -eq 1 ] && MCP_DISPLAY="installed"
 
+VERSION_DISPLAY="(none)"
+[ -f "$SOURCE_DIR/VERSION" ] && VERSION_DISPLAY="$(head -n1 "$SOURCE_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
+
+UPDATE_CHECK_DISPLAY="enabled (run 'lsdlc-config set update_check false' to disable)"
+_UC_SETTING="$(config_get update_check)"
+if [ "$_UC_SETTING" = "false" ]; then
+  UPDATE_CHECK_DISPLAY="disabled"
+fi
+
+TEAM_MODE_DISPLAY="off (run './setup --team' to enable background auto-update)"
+_TM_SETTING="$(config_get team_mode)"
+if [ "$_TM_SETTING" = "true" ]; then
+  TEAM_MODE_DISPLAY="on (SessionStart hook registered; './setup --no-team' to disable)"
+fi
+
 cat <<EOF
 
 linear-sdlc ready.
+  version:      $VERSION_DISPLAY
   source:       $SOURCE_DIR
   state:        $STATE_DIR
   bin:          $LOCAL_BIN/lsdlc-*
   api key:      $KEY_DISPLAY
   team id:      $TEAM_DISPLAY
   official MCP: $MCP_DISPLAY
+  update check: $UPDATE_CHECK_DISPLAY
+  team mode:    $TEAM_MODE_DISPLAY
 
 Try it:  /brainstorm rate limiting
-Update:  cd $SOURCE_DIR && git pull && ./setup
+Update:  cd $SOURCE_DIR && git pull && ./setup   (or run /upgrade from Claude)
 EOF

@@ -99,3 +99,23 @@ echo "PROJECT: $_SLUG"
 # ─── Session tracking ──────────────────────────────────────────
 _SESSION_ID="$$-$(date +%s)"
 lsdlc-timeline-log "{\"skill\":\"$SKILL_NAME\",\"event\":\"started\",\"branch\":\"$_BRANCH\",\"session\":\"$_SESSION_ID\"}" 2>/dev/null &
+
+# ─── Update check ──────────────────────────────────────────────
+# Runs last so it never delays the security/env path or project detection.
+# lsdlc-update-check is silent on the happy path and exits 0 on any failure,
+# so the `|| true` is belt-and-braces. When it emits an UPDATE_AVAILABLE /
+# JUST_UPGRADED line we also print a directive telling Claude to dispatch
+# to the /upgrade skill before continuing — this way individual SKILL.md
+# files don't each need their own awareness of the feature.
+if command -v lsdlc-update-check >/dev/null 2>&1; then
+  _LSDLC_UPD="$(lsdlc-update-check 2>/dev/null || true)"
+  if [ -n "$_LSDLC_UPD" ]; then
+    printf '%s\n' "$_LSDLC_UPD"
+    case "$_LSDLC_UPD" in
+      UPDATE_AVAILABLE*)
+        printf 'NOTE_TO_CLAUDE: A linear-sdlc update is available. Pause the current task, read and follow the /upgrade skill (skills/upgrade/SKILL.md), then resume the current skill.\n'
+        ;;
+    esac
+  fi
+  unset _LSDLC_UPD
+fi

@@ -7,6 +7,7 @@ This repo is a Claude Code **skills pack** that implements a Linear-driven SDLC 
 ```
 linear-sdlc/
 ├── setup                              # bash installer (idempotent, gstack-style)
+├── VERSION                            # plain semver string, fetched from GitHub raw by the update check
 ├── bin/
 │   ├── lsdlc-slug                     # derive project slug + branch from git
 │   ├── lsdlc-config                   # read/write ~/.linear-sdlc/config.json
@@ -15,6 +16,9 @@ linear-sdlc/
 │   ├── lsdlc-learnings-search         # query learnings with confidence decay
 │   ├── lsdlc-wiki-ingest              # synthesize learnings into wiki pages
 │   ├── lsdlc-wiki-lint                # check wiki freshness
+│   ├── lsdlc-update-check             # silent release-check helper called by the shared preamble
+│   ├── lsdlc-session-update           # team-mode background worker (SessionStart hook)
+│   ├── lsdlc-settings-hook            # idempotent add/remove of SessionStart hook in ~/.claude/settings.json
 │   └── lsdlc-linear                   # Linear GraphQL helper (Node, zero deps)
 ├── skills/
 │   ├── brainstorm/SKILL.md            # /brainstorm — feature planning
@@ -29,7 +33,8 @@ linear-sdlc/
 │   │       └── code-quality.md
 │   ├── debug/SKILL.md                 # /debug — bug investigation
 │   ├── checkpoint/SKILL.md            # /checkpoint — save/resume state
-│   └── health/SKILL.md                # /health — code quality dashboard
+│   ├── health/SKILL.md                # /health — code quality dashboard
+│   └── upgrade/SKILL.md               # /upgrade — autoupdate dialog + git upgrade
 ├── references/
 │   ├── preamble.md                    # shared bash block + LINEAR_SDLC_ROOT resolver
 │   ├── ask-user-format.md             # AskUserQuestion template
@@ -65,6 +70,7 @@ cd ~/.claude/skills/linear-sdlc
 4. **Team ID.** Setup prompts for the Linear team identifier and saves it via `lsdlc-config set linear_team_id <VALUE>`. The field accepts either a short team key (e.g., `VER`) or a team UUID (e.g., `07877f05-4f32-42b4-a2df-9e1764316652`). `bin/lsdlc-linear` auto-detects the format via a UUID regex and builds the appropriate GraphQL filter (`team: { id: ... }` vs `team: { key: ... }`). If you add a new code path that filters by team, use the `teamFilter()` / `teamMatches()` helpers in `lsdlc-linear` — don't hardcode `key`.
 5. **Source dir.** Setup persists the absolute repo path via `lsdlc-config set source_dir "$SOURCE_DIR"` so the preamble's path resolver has a fallback if `readlink` fails.
 6. **MCP prompt (informational only).** Setup prints instructions for installing Linear's first-party HTTP MCP (`claude mcp add --transport http linear https://mcp.linear.app/mcp`) but never installs it. The skills don't depend on it.
+7. **Team mode (opt-in).** `./setup --team` sets `team_mode: true` + `auto_upgrade: true` in `config.json` and calls `bin/lsdlc-settings-hook add "$HOME/.local/bin/lsdlc-session-update"` to register the background auto-updater as a `SessionStart` hook in `~/.claude/settings.json`. `./setup --no-team` unsets the flags and strips the hook (while leaving foreign `SessionStart` hooks other tools registered untouched). Without either flag, `setup` leaves team-mode state alone — it's not a default, it's a per-run opt-in/opt-out.
 
 ## Preamble: bootstrap + shared source
 
@@ -93,7 +99,13 @@ The skills do not branch on whether the official Linear MCP server is installed.
 ```
 ~/.linear-sdlc/
 ├── env                                # LINEAR_API_KEY (mode 0600), if you used setup's prompt
-├── config.json                        # team id, prefs, source_dir
+├── config.json                        # team id, prefs, source_dir, update_check, auto_upgrade
+├── last-update-check                  # update-check cache: "<result> <local> <remote> <ts>"
+├── update-snoozed                     # "<version> <level> <epoch>" when the user picks "Not now"
+├── just-upgraded-from                 # "<old> <new>" marker, shown once after a /upgrade
+├── .last-session-update               # team-mode throttle timestamp (epoch seconds, 1h window)
+├── .session-update.lock               # team-mode PID lockfile (auto-cleanup of stale PIDs)
+├── analytics/session-update.log       # team-mode worker log (decisions + fetch/reset/setup output)
 └── projects/<slug>/                   # slug derived from git remote
     ├── learnings.jsonl                # append-only operational notes (with confidence decay)
     ├── timeline.jsonl                 # skill execution log
@@ -104,6 +116,29 @@ The skills do not branch on whether the official Linear MCP server is installed.
 ```
 
 Override the state dir for tests: `LSDLC_STATE_DIR=/tmp/test-state ./setup`. All bin scripts and the skill preamble respect this.
+
+## Autoupdate
+
+The shared preamble runs `bin/lsdlc-update-check` on every skill invocation. It's silent on the happy path; when a newer release is available it prints `UPDATE_AVAILABLE <old> <new>` plus a one-line `NOTE_TO_CLAUDE:` directive telling Claude to dispatch to `/upgrade` before resuming the current skill. The `/upgrade` skill (`skills/upgrade/SKILL.md`) then runs the Yes / Always / Not now / Never ask again dialog and, on Yes, runs `git fetch origin && git reset --hard origin/main && ./setup --skip-api-key --skip-mcp-prompt -q`.
+
+**Design choices** (see `bin/lsdlc-update-check` header for the full rationale):
+- **Split-TTL cache:** `UP_TO_DATE` expires after 60 min (detect new releases quickly), `UPGRADE_AVAILABLE` after 12 h (nag persistently without spamming the network).
+- **Escalating snooze:** "Not now" responses cumulate 24 h → 48 h → 7 d. A new remote version voids the old snooze — the user always hears about real news.
+- **Offline-safe:** curl failures are treated as UP_TO_DATE and no cache entry is written, so the next invocation retries.
+- **Config-based opt-out:** `lsdlc-config set update_check false` silences all checks; `auto_upgrade true` runs the upgrade without a dialog.
+
+**Release process** — bump `VERSION` and add a `CHANGELOG.md` entry in the same commit, then tag. `bin/lsdlc-update-check` fetches the raw `VERSION` file from `main`, so the moment `VERSION` is pushed, users start seeing the banner on their next skill invocation (subject to their cache TTL).
+
+**Team mode (opt-in background updater).** `./setup --team` registers a `SessionStart` hook in `~/.claude/settings.json` that runs `bin/lsdlc-session-update` on every Claude Code session start. The worker is forked into the background immediately (exit 0, never blocks session startup), throttled to once per hour via `~/.linear-sdlc/.last-session-update`, PID-locked via `~/.linear-sdlc/.session-update.lock`, and logs all decisions and outcomes to `~/.linear-sdlc/analytics/session-update.log`. It self-gates on two config flags — `team_mode: true` and `update_check != false` — so even with the hook still registered, users can disable it via `lsdlc-config set team_mode false` or `lsdlc-config set update_check false` without editing `settings.json`. `./setup --no-team` performs the clean teardown: unsets `team_mode` and `auto_upgrade`, then calls `bin/lsdlc-settings-hook remove "$HOME/.local/bin/lsdlc-session-update"` which preserves any foreign `SessionStart` hooks other tools have registered.
+
+**`bin/lsdlc-settings-hook` ownership rules:** the helper only adds/removes entries whose `command` exactly matches the argument passed in. An `add` inserts a fresh wrapper entry (`{ hooks: [{ type, command }] }`) rather than merging into an existing one, so a later `remove` can strip exactly what was added without touching other tools' hooks. It refuses to write if `settings.json` is not valid JSON (prints an error and exits 1). Writes are atomic via temp-file + rename, mode `0600`.
+
+**Drift guard:** only the shared preamble and the `/upgrade` skill should call `lsdlc-update-check`. If any other skill body invokes it directly, fold the call back into `references/preamble.sh`.
+
+```bash
+# Expect exactly one hit: skills/upgrade/SKILL.md (which forces a fresh check).
+grep -rn 'lsdlc-update-check' skills/
+```
 
 ## Hacking on the repo
 
@@ -120,7 +155,7 @@ Override the state dir for tests: `LSDLC_STATE_DIR=/tmp/test-state ./setup`. All
   Should return zero hits. If anything turns up, that's a v1 leak.
 - **Verify no skill has drifted away from the shared preamble:**
   ```bash
-  grep -rln 'preamble.sh' skills/   # expect exactly 7 files
+  grep -rln 'preamble.sh' skills/   # expect exactly 8 files (one per skill)
   grep -rn  'LINEAR_API_KEY' skills/  # expect zero hits — only the shared preamble loads it
   ```
   If a skill has its own env-sourcing block, fold it back into `references/preamble.sh` — we explicitly don't want the RCE-relevant code duplicated.

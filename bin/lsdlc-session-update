@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# lsdlc-session-update — background auto-updater for linear-sdlc "team mode".
+#
+# Registered as a SessionStart hook in ~/.claude/settings.json by
+# `./setup --team`. Runs at the start of every Claude Code session, forks a
+# background worker, and returns exit 0 immediately so session startup is
+# never blocked.
+#
+# The background worker:
+#   1. Respects the config flags (`update_check`, `team_mode`).
+#   2. Is throttled to once per hour via a timestamp file.
+#   3. Uses a PID-based lockfile to prevent concurrent runs.
+#   4. Fetches origin, fast-forwards to origin/main, re-runs `./setup -q`.
+#   5. Writes the `just-upgraded-from` marker and clears the update cache
+#      so the next in-band skill invocation prints "JUST_UPGRADED" once.
+#   6. Logs every decision and outcome to analytics/session-update.log.
+#   7. Refuses to clobber uncommitted source changes.
+#
+# Exit code is ALWAYS 0 — a broken session-update hook must not break
+# Claude Code session startup.
+#
+# Env overrides (for tests):
+#   LSDLC_STATE_DIR           — override ~/.linear-sdlc state dir
+#   LSDLC_SESSION_FOREGROUND  — if "1", run synchronously (no fork). Useful
+#                               for e2e tests that need deterministic output.
+#   LSDLC_NOW                 — override `date +%s` (epoch seconds)
+
+set -euo pipefail
+
+STATE_DIR="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+THROTTLE_FILE="$STATE_DIR/.last-session-update"
+LOCK_FILE="$STATE_DIR/.session-update.lock"
+LOG_DIR="$STATE_DIR/analytics"
+LOG_FILE="$LOG_DIR/session-update.log"
+THROTTLE_WINDOW=$((60 * 60))  # 1 hour
+
+now() { echo "${LSDLC_NOW:-$(date +%s)}"; }
+
+# Locate lsdlc-config the same way lsdlc-update-check does: prefer the copy
+# next to this script (so hook commands with absolute paths still work when
+# ~/.local/bin isn't on PATH under the Claude Code process environment).
+_SELF_DIR="$(cd "$(dirname "$0")" && pwd -P 2>/dev/null || echo "")"
+LSDLC_CONFIG_BIN=""
+if [ -n "$_SELF_DIR" ] && [ -x "$_SELF_DIR/lsdlc-config" ]; then
+  LSDLC_CONFIG_BIN="$_SELF_DIR/lsdlc-config"
+elif command -v lsdlc-config >/dev/null 2>&1; then
+  LSDLC_CONFIG_BIN="$(command -v lsdlc-config)"
+fi
+
+config_get() {
+  [ -n "$LSDLC_CONFIG_BIN" ] || return 0
+  LSDLC_STATE_DIR="$STATE_DIR" "$LSDLC_CONFIG_BIN" get "$1" 2>/dev/null || true
+}
+
+log_line() {
+  mkdir -p "$LOG_DIR" 2>/dev/null || return 0
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+# ─── Foreground worker ────────────────────────────────────────
+# Everything that does actual work lives in a single function so we can
+# easily fork it off into the background on the normal path while still
+# running it synchronously under LSDLC_SESSION_FOREGROUND=1.
+run_worker() {
+  # Gate 1: global opt-out kills the hook entirely.
+  _UC=$(config_get update_check)
+  if [ "$_UC" = "false" ]; then
+    log_line "skip: update_check=false"
+    return 0
+  fi
+
+  # Gate 2: team mode must be explicitly enabled. Without this, the hook is
+  # a no-op even if it's still registered in settings.json.
+  _TM=$(config_get team_mode)
+  if [ "$_TM" != "true" ]; then
+    log_line "skip: team_mode!=true"
+    return 0
+  fi
+
+  # Gate 3: throttle. Never run more than once per hour.
+  _NOW=$(now)
+  if [ -f "$THROTTLE_FILE" ]; then
+    _LAST=$(head -n1 "$THROTTLE_FILE" 2>/dev/null || echo 0)
+    case "$_LAST" in ''|*[!0-9]*) _LAST=0 ;; esac
+    _AGE=$((_NOW - _LAST))
+    if [ "$_AGE" -ge 0 ] && [ "$_AGE" -lt "$THROTTLE_WINDOW" ]; then
+      log_line "skip: throttled (last=$_LAST, age=${_AGE}s)"
+      return 0
+    fi
+  fi
+
+  # Gate 4: PID-based lockfile to prevent concurrent runs. A stale lock
+  # (dead PID) is cleaned up automatically.
+  if [ -f "$LOCK_FILE" ]; then
+    _OLDPID=$(head -n1 "$LOCK_FILE" 2>/dev/null || echo "")
+    if [ -n "$_OLDPID" ] && kill -0 "$_OLDPID" 2>/dev/null; then
+      log_line "skip: locked by pid $_OLDPID"
+      return 0
+    fi
+    log_line "clearing stale lock (pid $_OLDPID)"
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+  fi
+  mkdir -p "$STATE_DIR"
+  echo "$$" > "$LOCK_FILE"
+  # Release the lock no matter how we exit.
+  trap 'rm -f "$LOCK_FILE" 2>/dev/null || true' EXIT
+
+  # Update the throttle timestamp up-front so a crash halfway through doesn't
+  # cause us to retry immediately on the next session start. Worst case we
+  # skip one update cycle; never worse than that.
+  echo "$_NOW" > "$THROTTLE_FILE"
+
+  # Resolve the checkout path. source_dir is written by setup.
+  _ROOT=$(config_get source_dir)
+  if [ -z "$_ROOT" ] || [ ! -d "$_ROOT/.git" ]; then
+    log_line "skip: source_dir missing or not a git checkout ($_ROOT)"
+    return 0
+  fi
+
+  # Refuse to clobber a dirty working tree. Developer work always beats the
+  # auto-updater.
+  cd "$_ROOT"
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    log_line "skip: uncommitted changes in $_ROOT"
+    return 0
+  fi
+
+  # Fetch. GIT_TERMINAL_PROMPT=0 so a credential prompt can't hang the hook.
+  # All fetch output goes to the log file, never to stdout.
+  log_line "fetching origin in $_ROOT"
+  if ! GIT_TERMINAL_PROMPT=0 git fetch origin >>"$LOG_FILE" 2>&1; then
+    log_line "fetch failed"
+    return 0
+  fi
+
+  _OLD_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+  _REMOTE_HEAD=$(git rev-parse origin/main 2>/dev/null || echo "")
+
+  if [ -z "$_OLD_HEAD" ] || [ -z "$_REMOTE_HEAD" ]; then
+    log_line "skip: could not resolve HEAD or origin/main"
+    return 0
+  fi
+
+  if [ "$_OLD_HEAD" = "$_REMOTE_HEAD" ]; then
+    log_line "up to date at $_OLD_HEAD"
+    return 0
+  fi
+
+  # Read local VERSION before the reset so we can write a just-upgraded-from
+  # marker afterwards.
+  _OLD_VER=""
+  if [ -f "$_ROOT/VERSION" ]; then
+    _OLD_VER=$(head -n1 "$_ROOT/VERSION" 2>/dev/null | tr -d '[:space:]')
+  fi
+
+  log_line "resetting $_OLD_HEAD -> $_REMOTE_HEAD"
+  if ! git reset --hard "$_REMOTE_HEAD" >>"$LOG_FILE" 2>&1; then
+    log_line "reset failed — leaving tree alone"
+    return 0
+  fi
+
+  # Re-run setup in quiet, non-interactive mode so any new bin scripts or
+  # skills get symlinked. --skip-api-key + --skip-mcp-prompt avoid any
+  # interactive prompts.
+  log_line "running setup"
+  if ! LSDLC_STATE_DIR="$STATE_DIR" ./setup --skip-api-key --skip-mcp-prompt -q >>"$LOG_FILE" 2>&1; then
+    log_line "setup failed after upgrade — marking degraded"
+    return 0
+  fi
+
+  _NEW_VER=""
+  if [ -f "$_ROOT/VERSION" ]; then
+    _NEW_VER=$(head -n1 "$_ROOT/VERSION" 2>/dev/null | tr -d '[:space:]')
+  fi
+
+  # Write the just-upgraded-from marker so the next in-band skill invocation
+  # prints JUST_UPGRADED exactly once. Clear the update-check cache so the
+  # next skill doesn't show a stale "upgrade available" banner.
+  if [ -n "$_OLD_VER" ] && [ -n "$_NEW_VER" ]; then
+    printf '%s %s\n' "$_OLD_VER" "$_NEW_VER" > "$STATE_DIR/just-upgraded-from"
+  fi
+  rm -f "$STATE_DIR/last-update-check" "$STATE_DIR/update-snoozed" 2>/dev/null || true
+
+  log_line "upgraded $_OLD_VER -> $_NEW_VER (HEAD $_OLD_HEAD -> $_REMOTE_HEAD)"
+}
+
+# ─── Entry point ──────────────────────────────────────────────
+# Normal path: fork the worker and exit 0 immediately so SessionStart is
+# never blocked by network latency. Test path: LSDLC_SESSION_FOREGROUND=1
+# runs synchronously so we can assert on the side effects.
+if [ "${LSDLC_SESSION_FOREGROUND:-0}" = "1" ]; then
+  run_worker
+  exit 0
+fi
+
+# Fork. Redirect all fds so the child doesn't hold the parent shell's stdio.
+# We already log everything to $LOG_FILE internally.
+(
+  run_worker
+) </dev/null >/dev/null 2>&1 &
+
+# Don't wait for the child. Return control to Claude Code immediately.
+disown "$!" 2>/dev/null || true
+exit 0

@@ -17,7 +17,7 @@ A complete SDLC workflow for teams using Linear + Claude Code. Ticket-driven dev
 
 Open Claude Code and paste the prompt below verbatim. Claude runs the clone + setup for you, then writes a short `linear-sdlc` section into your `~/.claude/CLAUDE.md` so future sessions know the skills exist.
 
-> Install linear-sdlc: run **`git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup --skip-api-key --skip-mcp-prompt`** then add a "linear-sdlc" section to `~/.claude/CLAUDE.md` that lists the available skills: /brainstorm, /create-tickets, /next, /implement, /debug, /checkpoint, /health, and notes that each loads project context (learnings, wiki, timeline) from `~/.linear-sdlc/projects/<slug>/`. Then tell me to run `cd ~/.claude/skills/linear-sdlc && ./setup` once in a terminal to enter my Linear API key (from https://linear.app/settings/api) and team ID. Finally, ask me if I also want to install Linear's official HTTP MCP server for ad-hoc Linear queries (`claude mcp add --transport http linear https://mcp.linear.app/mcp`).
+> Install linear-sdlc: run **`git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup --skip-api-key --skip-mcp-prompt`** then add a "linear-sdlc" section to `~/.claude/CLAUDE.md` that lists the available skills: /brainstorm, /create-tickets, /next, /implement, /debug, /checkpoint, /health, /upgrade, and notes that each loads project context (learnings, wiki, timeline) from `~/.linear-sdlc/projects/<slug>/`. Then tell me to run `cd ~/.claude/skills/linear-sdlc && ./setup` once in a terminal to enter my Linear API key (from https://linear.app/settings/api) and team ID. Finally, ask me if I also want to install Linear's official HTTP MCP server for ad-hoc Linear queries (`claude mcp add --transport http linear https://mcp.linear.app/mcp`).
 
 This runs the non-interactive parts of setup (skill symlinks, bin linking, directory creation) inside Claude Code. The secrets-handling step — API key + team ID — is left to you, in a real terminal, so your credentials never flow through the chat history.
 
@@ -51,6 +51,12 @@ Use `git@github.com:...` instead if you prefer SSH. Full clone (no `--depth 1`) 
 
 ### Updating
 
+linear-sdlc has **autoupdate** built in — every skill invocation silently checks whether a newer release is on GitHub, and when one exists the preamble prints an `UPDATE_AVAILABLE` banner. Claude then dispatches the `/upgrade` skill, which asks you (Yes / Always / Not now / Never ask again) and, on yes, runs the git upgrade for you. See [Autoupdate](#autoupdate) for the full behavior.
+
+For teams that want fully hands-off updates, there's also an opt-in **team mode** (`./setup --team`) that installs a `SessionStart` hook so a background worker silently fetches the latest release on every Claude Code session start. See [Team mode](#team-mode-background-auto-update).
+
+You can also upgrade manually at any time:
+
 ```bash
 cd ~/.claude/skills/linear-sdlc
 git pull
@@ -63,13 +69,13 @@ git pull
 
 ```bash
 # Remove skill symlinks — covers both install modes (/brainstorm and /linear-sdlc-brainstorm)
-for _name in brainstorm next implement create-tickets checkpoint debug health; do
+for _name in brainstorm next implement create-tickets checkpoint debug health upgrade; do
   rm -rf ~/.claude/skills/"$_name" ~/.claude/skills/"linear-sdlc-$_name"
 done
 rm -f  ~/.local/bin/lsdlc-*
 # Remove the checkout
 rm -rf ~/.claude/skills/linear-sdlc
-# Optional: wipe project state (learnings, timelines, checkpoints, wiki)
+# Optional: wipe project state (learnings, timelines, checkpoints, wiki, update cache)
 rm -rf ~/.linear-sdlc
 ```
 
@@ -197,6 +203,7 @@ Each skill hands off to the next. `/brainstorm` writes a spec that `/create-tick
 | `/debug` | **Debugger** | Phase-1 diagnostic discipline: reproduce → identify component boundaries → instrument at the boundary → observe → hypothesize root cause → propose the minimal fix. Evidence before hypothesis. Soft rule, not iron law — User Sovereignty still applies, you can override at any point. |
 | `/checkpoint` | **Session Memory** | Save and resume working state across Claude Code sessions. Captures git branch, current ticket, completed + remaining work, PR link, open notes. Writes to `~/.linear-sdlc/projects/<slug>/checkpoints/` as plain markdown — you can read them without any tooling. `/checkpoint resume` loads the most recent one and re-grounds the conversation. |
 | `/health` | **Quality Lead** | Auto-detects your project's quality tools (pytest / jest / vitest, eslint / biome / ruff, tsc / mypy / pyright, vulture / knip), runs each, and computes a weighted composite score (tests 30%, lint 25%, types 25%, dead code 20%). Logs the score to `health-history.jsonl` so you can see the trend across sprints. Flags regressions relative to the last run. |
+| `/upgrade` | **Release Manager** | Dispatched automatically when the shared preamble detects a new linear-sdlc release on GitHub (or invokable directly). Presents a Yes / Always / Not now / Never dialog, runs `git fetch && git reset --hard origin/main && ./setup` on a clean working tree, and prints the new CHANGELOG entry. Refuses to clobber uncommitted local edits to the linear-sdlc checkout. See [Autoupdate](#autoupdate). |
 
 Every skill logs its execution to `timeline.jsonl` so the next invocation of `/next`, `/implement`, or `/checkpoint` can surface *"what did I last do on this branch?"* without asking you. That's why the table of contents for any Linear ticket ends up matching your actual work history — the thread is the ticket, and the thread is the state directory.
 
@@ -287,7 +294,14 @@ All persistent state lives at `~/.linear-sdlc/`:
 ```
 ~/.linear-sdlc/
 ├── env                              # API key (mode 0600), if you used setup's prompt
-├── config.json                      # team ID (key or UUID), prefs (managed by lsdlc-config)
+├── config.json                      # team ID, skill_prefix, source_dir, update_check, auto_upgrade
+├── last-update-check                # autoupdate cache: "<result> <local> <remote> <ts>"
+├── update-snoozed                   # escalating "Not now" snooze: "<version> <level> <epoch>"
+├── just-upgraded-from               # "<old> <new>" marker, shown once after /upgrade
+├── .last-session-update             # team-mode throttle timestamp (1h window)
+├── .session-update.lock             # team-mode PID lockfile (auto-clears stale PIDs)
+├── analytics/
+│   └── session-update.log           # team-mode worker decisions + git output
 └── projects/
     └── {slug}/                      # per-project (slug derived from git remote)
         ├── learnings.jsonl          # operational notes (append-only, with confidence decay)
@@ -313,6 +327,9 @@ Override the location with `LSDLC_STATE_DIR=/path/to/state`.
 | `lsdlc-learnings-search` | Search learnings with confidence decay and dedup |
 | `lsdlc-wiki-ingest` | Synthesize learnings into wiki pages (3+ per topic) |
 | `lsdlc-wiki-lint` | Check wiki for stale or inconsistent content |
+| `lsdlc-update-check` | Silent release-check helper called by the shared preamble (see [Autoupdate](#autoupdate)) |
+| `lsdlc-session-update` | Team-mode background auto-updater — forks on Claude Code session start, respects throttle/lock/config gates |
+| `lsdlc-settings-hook` | Idempotent add/remove of entries in `~/.claude/settings.json` hooks; preserves foreign hooks on remove |
 | `lsdlc-linear` | Direct Linear GraphQL helper (see [above](#the-lsdlc-linear-helper)) |
 
 After `./setup`, all of these are on your `PATH` via `~/.local/bin/`. You can call them from any terminal — they're not Claude-specific.
@@ -329,6 +346,7 @@ Each skill is a single `SKILL.md` file with YAML frontmatter declaring which Cla
 | `/debug` | Sonnet | Medium | Diagnostic reasoning needs structure, not raw creativity |
 | `/health` | Sonnet | Medium | Tool detection + composite scoring — structured, not creative |
 | `/checkpoint` | Sonnet | Low | Mechanical state dump/restore |
+| `/upgrade` | Sonnet | Medium | Mostly mechanical (git fetch + reset + setup), but needs judgment on the snooze/opt-out dialog and refuses to clobber uncommitted edits |
 | `/next` | Haiku | Low | Query, rank, present — no synthesis |
 
 Names above assume the default `--no-prefix` install. With `--prefix`, they become `/linear-sdlc-brainstorm`, etc.
@@ -359,6 +377,101 @@ Every skill loads relevant learnings at startup via the preamble, so context acc
 ### Timeline
 
 Every skill execution is logged to `timeline.jsonl` (start, completion, outcome). On session start, the preamble checks the timeline and surfaces what happened last on the current branch — helping you pick up where you left off.
+
+## Autoupdate
+
+linear-sdlc nags you when a newer release is available, with a dialog that respects your decision and doesn't interrupt the same way twice. The feature is a close port of gstack's autoupdate, adapted to linear-sdlc's shared-preamble architecture.
+
+**How it fires.** Every skill's preamble runs `lsdlc-update-check` as its last step. The helper is silent on the happy path (cache hit, up to date, offline, opted out, snoozed). When a newer release exists, it prints a single `UPDATE_AVAILABLE <old> <new>` line to Claude's output, plus a one-line directive telling Claude to dispatch the `/upgrade` skill before resuming the current task. The update check itself never blocks a skill — it has a 5-second curl timeout and always exits 0.
+
+**The dialog.** `/upgrade` runs an `AskUserQuestion` with four options:
+
+- **Yes, upgrade now** — runs `git fetch && git reset --hard origin/main && ./setup --skip-api-key --skip-mcp-prompt -q` in the linear-sdlc checkout, prints the new `CHANGELOG.md` entry, and resumes the skill you were running.
+- **Always keep me up to date** — sets `auto_upgrade: true` in `~/.linear-sdlc/config.json`, then upgrades. Future releases install silently without another dialog.
+- **Not now** — writes an escalating snooze: 24 hours the first time, 48 hours the second, 7 days after that. A **new** remote release voids the old snooze, so you always hear about real news.
+- **Never ask again** — sets `update_check: false`. No more checks, no more banners. Re-enable any time with `lsdlc-config unset update_check`.
+
+**Safety rules.** `/upgrade` refuses to proceed if your linear-sdlc checkout has uncommitted changes (`git status` is non-empty), so your hacking-on-the-repo work is never silently clobbered. If you've made local edits, it tells you to commit/stash/discard first.
+
+**Cache behavior.** The checker uses a split-TTL cache so it doesn't hit the network on every skill invocation:
+
+| State | TTL | Why |
+|---|---|---|
+| `UP_TO_DATE` | 60 min | Detect new releases within an hour of release |
+| `UPGRADE_AVAILABLE` | 12 h | Keep nagging without spamming the network once a release is known |
+
+Network failures (curl timeout, DNS failure, HTTP error, invalid response body) are treated as `UP_TO_DATE` and **do not** write a cache entry, so the next invocation retries soon. If you're offline, you simply don't see the banner — no error, no delay.
+
+**Opt out, turn back on, or force a check.**
+
+```bash
+# Disable all update checks
+lsdlc-config set update_check false
+
+# Re-enable
+lsdlc-config unset update_check
+
+# Enable silent auto-upgrade (no dialog, upgrades on the next skill run)
+lsdlc-config set auto_upgrade true
+
+# Disable silent auto-upgrade
+lsdlc-config unset auto_upgrade
+
+# Force an immediate check, ignoring cache and snooze
+lsdlc-update-check --force
+```
+
+**Running `/upgrade` manually.** You can invoke it directly any time — it will re-run `lsdlc-update-check --force` and either upgrade, tell you you're already on the latest, or tell you the network check failed.
+
+### Team mode (background auto-update)
+
+For teams that want everyone pinned to the same linear-sdlc release without running `git pull` by hand, there's an opt-in **team mode** that installs a `SessionStart` hook in your Claude Code settings. At the start of every Claude Code session, a background worker silently fetches `origin/main`, fast-forwards if there's something new, and re-runs `./setup` — all in the background, never blocking session startup.
+
+Enable it with:
+
+```bash
+cd ~/.claude/skills/linear-sdlc
+./setup --team
+```
+
+That flag does three things:
+
+1. Sets `auto_upgrade: true` and `team_mode: true` in `~/.linear-sdlc/config.json`.
+2. Adds a `SessionStart` hook entry to `~/.claude/settings.json` pointing at `~/.local/bin/lsdlc-session-update`.
+3. Leaves everything else in your settings file alone — including any `SessionStart` hooks other tools registered.
+
+**What the background worker does.** On every session start, it:
+
+- **Forks immediately and returns exit 0.** Session startup is never delayed by network latency.
+- **Respects throttling.** Runs at most once per hour via `~/.linear-sdlc/.last-session-update`. Rapid session-open cycles don't thrash the network.
+- **Respects locking.** A PID-based lockfile at `~/.linear-sdlc/.session-update.lock` prevents concurrent runs. Stale locks (dead PIDs) are auto-cleared.
+- **Self-gates on config.** Checks `team_mode: true` + `update_check != false` every time. Disabling either one via `lsdlc-config` instantly neutralizes the hook, no JSON editing required.
+- **Refuses to clobber uncommitted source changes.** If your linear-sdlc checkout has a dirty working tree, the worker logs "skip: uncommitted changes" and bails. Developer work always wins.
+- **Logs everything** to `~/.linear-sdlc/analytics/session-update.log` — UTC-timestamped decisions, fetch output, HEAD transitions, setup output. You can audit exactly what the updater did.
+- **Fires the `just-upgraded-from` marker** after a successful upgrade, so the next in-band skill invocation prints `JUST_UPGRADED <old> <new>` exactly once.
+
+**Temporarily pause the updater without un-registering the hook:**
+
+```bash
+lsdlc-config set team_mode false       # or: set update_check false
+# re-enable later:
+lsdlc-config unset team_mode           # or: unset update_check
+```
+
+**Fully uninstall team mode:**
+
+```bash
+cd ~/.claude/skills/linear-sdlc
+./setup --no-team
+```
+
+This unsets `team_mode` + `auto_upgrade` and removes the `SessionStart` hook entry. Foreign `SessionStart` hooks (ones other tools registered) are preserved.
+
+**What's NOT shipped in v2.2.0** (may be revisited):
+
+- No telemetry — the check never phones home beyond fetching the raw `VERSION` file from GitHub.
+- No migration scripts — if a future release needs post-upgrade steps, the `/upgrade` skill will be extended to run them.
+- Only git-install is supported — linear-sdlc has always been distributed as a git clone, so both `/upgrade` and the team-mode worker do `git fetch && git reset --hard origin/main && ./setup`. There's no tarball/vendored-install upgrade path.
 
 ## Hacking on linear-sdlc
 

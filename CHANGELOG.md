@@ -1,5 +1,71 @@
 # Changelog
 
+## v2.2.0 — 2026-04-09 — Autoupdate (port from gstack)
+
+Every skill now nudges the user when a newer linear-sdlc release is on GitHub, with a four-option dialog (Yes / Always / Not now / Never ask again) and a one-command upgrade. The implementation is a close port of gstack's autoupdate feature, adapted to linear-sdlc's shared-preamble architecture.
+
+### Additions
+
+- **`VERSION` file at the repo root.** Plain semver string (`2.2.0`), fetched from `raw.githubusercontent.com/douglasswm/linear-sdlc/main/VERSION` by the release check. Bump in lockstep with `CHANGELOG.md` on every release — that single push is what makes the nag appear for users.
+- **`bin/lsdlc-update-check`** — silent, non-blocking release-check helper. Called by the shared preamble on every skill invocation. Output is at most one line (`UPDATE_AVAILABLE <old> <new>`, `JUST_UPGRADED <old> <new>`, or nothing). Exit code is always 0 so a broken update check can never break a skill. Features ported from gstack:
+  - **Split-TTL cache.** `UP_TO_DATE` expires after 60 min (detects new releases quickly), `UPGRADE_AVAILABLE` after 12 h (keeps nagging without spamming the network).
+  - **Escalating snooze.** "Not now" bumps silence from 24 h → 48 h → 7 d. A new remote version voids the old snooze so users always hear about real news.
+  - **Offline-safe.** curl failures, HTTP errors, or invalid-looking response bodies all silently no-op (and skip the cache write) so the next invocation retries soon.
+  - **Charset-validated remote body.** The regex `^[0-9]+\.[0-9]+\.[0-9]+$` rejects HTML error pages, CDN redirects, or anything that's not a plain semver string.
+  - **Next-to-self `lsdlc-config` discovery.** The script looks for `lsdlc-config` in its own directory before falling back to `$PATH`, so it works even before `~/.local/bin` is on the user's `PATH` (or during `LSDLC_STATE_DIR` tests).
+- **`skills/upgrade/SKILL.md` (`/upgrade`).** The user-facing half of the feature. Triggered automatically when the shared preamble emits an `UPDATE_AVAILABLE` line, or invokable directly as `/upgrade`. Presents a four-option `AskUserQuestion` dialog:
+  - **Yes, upgrade now** — `git fetch && git reset --hard origin/main && ./setup --skip-api-key --skip-mcp-prompt -q`, then prints the new section of `CHANGELOG.md`.
+  - **Always keep me up to date** — sets `auto_upgrade: true`, then upgrades. Subsequent releases install silently without a dialog.
+  - **Not now** — writes an escalating snooze and lets the caller resume.
+  - **Never ask again** — sets `update_check: false`, which disables all checks.
+  - **Safety guard:** refuses to proceed if `$LINEAR_SDLC_ROOT` has uncommitted changes in the working tree or index (prints `git status` and exits). Never silently clobbers local edits.
+  - **Auto-upgrade short-circuit:** if `auto_upgrade: true` is already set, the dialog is skipped entirely — the user explicitly told us not to ask.
+- **`references/preamble.sh` tail block.** Calls `lsdlc-update-check` last (after session tracking), so the update check never delays the security/env path or project detection. When a notification line is produced, the preamble also emits a `NOTE_TO_CLAUDE:` directive telling Claude to dispatch to `/upgrade` before resuming the current skill — that way individual `SKILL.md` files don't each need their own awareness of the feature. Matches the "one source of truth in the shared preamble" convention.
+- **`setup` changes:**
+  - **Seeds the update cache on fresh install.** Writes an `UP_TO_DATE` entry against the shipped `VERSION` so the first skill invocation after install doesn't make a cold network call to GitHub. Re-runs don't overwrite an existing cache (so a legitimate "upgrade available" nag isn't suppressed by `./setup`).
+  - **New `--team` / `--no-team` flags** wire up (or tear down) the team-mode background auto-updater. See "Team mode" below.
+  - **Final summary now shows `version:`, `update check:`, and `team mode:` lines.** So users can see at a glance which release they're on, whether checks are enabled, and whether the background updater is registered. The "Update:" help line also mentions `/upgrade` as an alternative to `git pull && ./setup`.
+
+### Team mode (opt-in background auto-updater)
+
+- **`./setup --team`** registers a `SessionStart` hook in `~/.claude/settings.json` that runs `bin/lsdlc-session-update` at the start of every Claude Code session. Also sets `team_mode: true` + `auto_upgrade: true` in `~/.linear-sdlc/config.json`. Designed for teams that want to pin everyone to the same linear-sdlc release without anyone running `git pull` manually.
+- **`bin/lsdlc-session-update`** is the background worker. Key properties:
+  - **Forks immediately and returns exit 0.** Session startup is never blocked by network latency. The worker runs in the background, detached from Claude Code's stdio.
+  - **Throttled to once per hour** via `~/.linear-sdlc/.last-session-update`. Rapid session-open cycles don't thrash the network.
+  - **PID-based lockfile** at `~/.linear-sdlc/.session-update.lock`. Stale locks (dead PIDs) are auto-cleared; live locks cause the worker to skip without touching them.
+  - **Self-gates on `team_mode: true` + `update_check != false`.** Even if the hook is still registered in `settings.json`, a user can disable the updater via `lsdlc-config set team_mode false` or `lsdlc-config set update_check false` without editing JSON. Both gates are rechecked on every invocation.
+  - **Refuses to clobber uncommitted source changes.** If `$LINEAR_SDLC_ROOT` has a dirty working tree or index, the worker logs "skip: uncommitted changes" and bails. Developer work always wins.
+  - **Full log at `~/.linear-sdlc/analytics/session-update.log`** — every decision (skip reason, fetch success/failure, HEAD transitions, setup output) is written with a UTC timestamp so users can audit what the updater did.
+  - **On successful upgrade:** writes `~/.linear-sdlc/just-upgraded-from`, clears `last-update-check` and `update-snoozed`, so the next in-band skill invocation prints `JUST_UPGRADED <old> <new>` exactly once.
+  - **`GIT_TERMINAL_PROMPT=0`** on the fetch so a credential prompt can't hang the hook.
+- **`bin/lsdlc-settings-hook`** is the helper that manages `~/.claude/settings.json`. Subcommands: `add <abs-cmd>`, `remove <abs-cmd>`, `list`. Idempotent: `add` is a no-op if the exact command is already present. Ownership-preserving: `add` always inserts a fresh wrapper entry (`{ hooks: [...] }`) rather than merging into an existing one, so a later `remove` strips exactly what was added without touching hooks other tools registered. Atomic writes via temp-file + rename (mode `0600`). Refuses to write if `settings.json` is not valid JSON (prints an error and exits 1 rather than clobbering).
+- **`./setup --no-team`** performs the clean teardown: unsets `team_mode` and `auto_upgrade`, then calls `bin/lsdlc-settings-hook remove "$HOME/.local/bin/lsdlc-session-update"`. Foreign `SessionStart` hooks other tools have registered survive the teardown intact.
+
+### State files
+
+New entries under `~/.linear-sdlc/` (honors `LSDLC_STATE_DIR`):
+- `last-update-check` — plain-text cache: `<result> <local> <remote> <ts>`
+- `update-snoozed` — escalating snooze: `<version> <level> <epoch>`
+- `just-upgraded-from` — `<old> <new>` marker, shown once then deleted
+
+New config keys in `~/.linear-sdlc/config.json`:
+- `update_check` — `"false"` to disable all checks
+- `auto_upgrade` — `"true"` to skip the dialog and upgrade silently
+
+### Scope limits (deliberate, may revisit)
+
+- **No Supabase telemetry.** gstack pings a Supabase edge function on every check for anonymous install metrics. linear-sdlc skips this — we're not collecting install counts.
+- **No migration scripts.** `gstack-upgrade/migrations/v<ver>.sh` runs idempotent post-setup scripts between old and new versions. Not needed yet — add when the first schema migration comes up.
+- **Only git-install is supported.** linear-sdlc has always been distributed as a git clone, so `/upgrade` and team-mode's background worker both do `git fetch && git reset --hard origin/main && ./setup`. There's no vendored-install (tarball) path like gstack has.
+
+### Drift guards
+
+```bash
+grep -rn 'lsdlc-update-check' skills/             # expect one hit: skills/upgrade/SKILL.md only
+grep -rln 'preamble.sh' skills/                   # expect 8 files (one per skill, including the new /upgrade)
+grep -rn  'LINEAR_API_KEY' skills/                # expect zero hits — only the shared preamble loads it
+```
+
 ## v2.1.0 — 2026-04-09 — Hardening pass + one-prompt install
 
 A follow-up cleanup on v2.0.0 that addresses a round of deferred review items and adopts gstack's one-prompt install style.

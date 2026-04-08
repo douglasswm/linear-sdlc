@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# lsdlc-settings-hook — idempotently add/remove a SessionStart hook entry in
+# ~/.claude/settings.json.
+#
+# Claude Code's hooks schema uses a nested array form:
+#
+#   {
+#     "hooks": {
+#       "SessionStart": [
+#         {
+#           "hooks": [
+#             { "type": "command", "command": "<abs path>" }
+#           ]
+#         }
+#       ]
+#     }
+#   }
+#
+# This helper preserves every other key in settings.json. It uses a temp
+# file + rename for atomic writes so a concurrent Claude Code process
+# reading settings.json never sees a half-written state.
+#
+# Usage:
+#   lsdlc-settings-hook add <absolute command>
+#   lsdlc-settings-hook remove <absolute command>
+#   lsdlc-settings-hook list
+#
+# Env overrides (for tests):
+#   CLAUDE_SETTINGS_FILE — override ~/.claude/settings.json (must be absolute)
+
+set -euo pipefail
+
+SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
+
+usage() {
+  cat <<EOF >&2
+Usage:
+  lsdlc-settings-hook add <absolute command>
+  lsdlc-settings-hook remove <absolute command>
+  lsdlc-settings-hook list
+
+The "add" form is idempotent — running it twice with the same command is
+a no-op. Only exact matches are removed by "remove".
+EOF
+  exit 1
+}
+
+case "${1:-}" in
+  add|remove|list) ;;
+  *) usage ;;
+esac
+
+SUBCMD="$1"
+CMD_ARG="${2:-}"
+if [ "$SUBCMD" != "list" ] && [ -z "$CMD_ARG" ]; then
+  usage
+fi
+
+# For add/remove, enforce an absolute path. A relative path in a hook entry
+# would silently fail to resolve under Claude Code's runtime, which is a
+# nightmare to debug.
+if [ "$SUBCMD" != "list" ]; then
+  case "$CMD_ARG" in
+    /*) : ;;
+    *)
+      echo "lsdlc-settings-hook: command must be an absolute path, got: $CMD_ARG" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+mkdir -p "$(dirname "$SETTINGS_FILE")"
+
+# Pass the file path + command to node via env vars (never as argv) so we
+# don't have to worry about shell quoting of command strings that might
+# contain spaces or special chars. The node snippet is quoted with single
+# quotes so the shell does NOT expand anything inside it.
+export LSDLC_SETTINGS_FILE="$SETTINGS_FILE"
+export LSDLC_HOOK_CMD="$CMD_ARG"
+export LSDLC_SUBCMD="$SUBCMD"
+
+node <<'NODE_EOF'
+const fs = require('fs');
+const path = require('path');
+
+const FILE = process.env.LSDLC_SETTINGS_FILE;
+const CMD = process.env.LSDLC_HOOK_CMD || '';
+const SUBCMD = process.env.LSDLC_SUBCMD;
+
+function readSettings() {
+  if (!fs.existsSync(FILE)) return {};
+  let raw;
+  try {
+    raw = fs.readFileSync(FILE, 'utf8');
+  } catch (e) {
+    console.error(`lsdlc-settings-hook: cannot read ${FILE}: ${e.message}`);
+    process.exit(1);
+  }
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error(`lsdlc-settings-hook: ${FILE} is not valid JSON (${e.message})`);
+    console.error(`  refusing to clobber — fix the file or move it aside.`);
+    process.exit(1);
+  }
+}
+
+function writeSettingsAtomic(obj) {
+  const tmp = FILE + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, FILE);
+}
+
+const settings = readSettings();
+settings.hooks = settings.hooks || {};
+settings.hooks.SessionStart = settings.hooks.SessionStart || [];
+
+// A SessionStart entry looks like:
+//   { "hooks": [ { "type": "command", "command": "..." }, ... ] }
+// There can be multiple entries (with different matcher conditions in
+// future schemas). We scan every inner hooks[] array for matching commands.
+
+function listCommands() {
+  const out = [];
+  for (const entry of settings.hooks.SessionStart) {
+    const inner = (entry && entry.hooks) || [];
+    for (const h of inner) {
+      if (h && h.type === 'command' && typeof h.command === 'string') {
+        out.push(h.command);
+      }
+    }
+  }
+  return out;
+}
+
+if (SUBCMD === 'list') {
+  for (const c of listCommands()) console.log(c);
+  process.exit(0);
+}
+
+if (SUBCMD === 'add') {
+  // Idempotent: if CMD is already present, do nothing.
+  if (listCommands().includes(CMD)) {
+    process.exit(0);
+  }
+  // Append a fresh wrapper entry containing just our command. We deliberately
+  // don't merge into an existing wrapper entry — that keeps ownership clean
+  // so "remove" can strip exactly what "add" inserted without touching hooks
+  // other tools registered.
+  settings.hooks.SessionStart.push({
+    hooks: [{ type: 'command', command: CMD }],
+  });
+  writeSettingsAtomic(settings);
+  process.exit(0);
+}
+
+if (SUBCMD === 'remove') {
+  // Walk every wrapper entry, drop matching commands, and drop wrapper
+  // entries whose hooks[] ended up empty. Leave everything else untouched.
+  const kept = [];
+  for (const entry of settings.hooks.SessionStart) {
+    if (!entry || !Array.isArray(entry.hooks)) {
+      kept.push(entry);
+      continue;
+    }
+    const keptInner = entry.hooks.filter(
+      (h) => !(h && h.type === 'command' && h.command === CMD)
+    );
+    if (keptInner.length > 0) {
+      entry.hooks = keptInner;
+      kept.push(entry);
+    }
+    // else: drop the empty wrapper entry entirely.
+  }
+  settings.hooks.SessionStart = kept;
+
+  // If we emptied SessionStart completely, remove the key so we don't leave
+  // an empty array sitting in the user's settings file.
+  if (settings.hooks.SessionStart.length === 0) {
+    delete settings.hooks.SessionStart;
+  }
+  if (Object.keys(settings.hooks).length === 0) {
+    delete settings.hooks;
+  }
+  writeSettingsAtomic(settings);
+  process.exit(0);
+}
+NODE_EOF

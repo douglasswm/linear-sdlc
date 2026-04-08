@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# lsdlc-update-check — check whether a newer linear-sdlc release is available.
+#
+# Called by the shared preamble on every skill invocation. Designed to be
+# silent and non-blocking: stdout is at most one line, stderr is only used
+# for unexpected problems, exit code is always 0.
+#
+# Output (stdout):
+#   (nothing)                              — up to date, opted out, snoozed
+#   UPDATE_AVAILABLE <old> <new>           — newer remote VERSION than local
+#   JUST_UPGRADED    <old> <new>           — post-upgrade marker, shown once
+#
+# Usage:
+#   lsdlc-update-check            — normal check (respects cache + snooze)
+#   lsdlc-update-check --force    — bust cache and snooze, always re-check
+#
+# Env overrides (all optional, mainly for testing):
+#   LSDLC_STATE_DIR   — override ~/.linear-sdlc state dir
+#   LSDLC_UPDATE_URL  — override the GitHub raw VERSION URL
+#                       (supports file:// for offline tests)
+#   LSDLC_NOW         — override `date +%s` (epoch seconds)
+#   LINEAR_SDLC_ROOT  — skip path resolution if already set by the caller
+#
+# Design choices (see plan file for full rationale):
+#   - Split-TTL cache: UP_TO_DATE expires fast (detect new releases quickly),
+#     UPGRADE_AVAILABLE expires slowly (keep nagging without network spam).
+#   - Escalating snooze: "Not now" responses cumulate 24h → 48h → 7d silence.
+#   - A new remote version resets snooze so users always hear about releases.
+#   - curl failures are treated as "up to date" — never block skills offline.
+#   - The remote is `raw.githubusercontent.com/<repo>/main/VERSION`, a single
+#     semver string. Any response that doesn't match `x.y.z` is discarded.
+
+set -euo pipefail
+
+STATE_DIR="${LSDLC_STATE_DIR:-$HOME/.linear-sdlc}"
+CACHE_FILE="$STATE_DIR/last-update-check"
+SNOOZE_FILE="$STATE_DIR/update-snoozed"
+MARKER_FILE="$STATE_DIR/just-upgraded-from"
+
+UPDATE_URL="${LSDLC_UPDATE_URL:-https://raw.githubusercontent.com/douglasswm/linear-sdlc/main/VERSION}"
+
+# TTLs (seconds)
+TTL_UP_TO_DATE=$((60 * 60))         # 60 minutes
+TTL_UPGRADE_AVAILABLE=$((12 * 3600)) # 12 hours (720 minutes)
+CURL_TIMEOUT=5
+
+# Snooze levels (seconds)
+SNOOZE_L1=$((24 * 3600))        # 24 hours
+SNOOZE_L2=$((48 * 3600))        # 48 hours
+SNOOZE_L3=$((7 * 24 * 3600))    # 7 days
+
+FORCE=0
+if [ "${1:-}" = "--force" ]; then
+  FORCE=1
+fi
+
+now() { echo "${LSDLC_NOW:-$(date +%s)}"; }
+
+# Locate lsdlc-config: prefer the copy next to this script (works even if
+# ~/.local/bin isn't on PATH, e.g. during tests or broken installs), then
+# fall back to whatever's on PATH.
+_SELF_DIR="$(cd "$(dirname "$0")" && pwd -P 2>/dev/null || echo "")"
+LSDLC_CONFIG_BIN=""
+if [ -n "$_SELF_DIR" ] && [ -x "$_SELF_DIR/lsdlc-config" ]; then
+  LSDLC_CONFIG_BIN="$_SELF_DIR/lsdlc-config"
+elif command -v lsdlc-config >/dev/null 2>&1; then
+  LSDLC_CONFIG_BIN="$(command -v lsdlc-config)"
+fi
+
+config_get() {
+  [ -n "$LSDLC_CONFIG_BIN" ] || return 0
+  LSDLC_STATE_DIR="$STATE_DIR" "$LSDLC_CONFIG_BIN" get "$1" 2>/dev/null || true
+}
+
+# Validate a string looks like a plain semver x.y.z. Rejects anything else
+# (HTML error pages, whitespace, leading "v", etc.) so we never compare
+# garbage to a real version.
+is_valid_version() {
+  case "$1" in
+    '') return 1 ;;
+    *[!0-9.]*) return 1 ;;
+  esac
+  # Must have exactly two dots.
+  local dots=${1//[^.]/}
+  [ ${#dots} -eq 2 ] || return 1
+  return 0
+}
+
+# Resolve LINEAR_SDLC_ROOT so we can read the local VERSION.
+resolve_root() {
+  if [ -n "${LINEAR_SDLC_ROOT:-}" ] && [ -f "$LINEAR_SDLC_ROOT/VERSION" ]; then
+    return 0
+  fi
+  for _c in "$HOME/.claude/skills/upgrade/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-upgrade/SKILL.md" \
+            "$HOME/.claude/skills/brainstorm/SKILL.md" \
+            "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
+    if [ -L "$_c" ]; then
+      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_c")")/../.." && pwd)" 2>/dev/null || continue
+      [ -f "$LINEAR_SDLC_ROOT/VERSION" ] && return 0
+    fi
+  done
+  # Fall back to lsdlc-config (via config_get, which honors the next-to-self lookup).
+  LINEAR_SDLC_ROOT="$(config_get source_dir)"
+  [ -n "$LINEAR_SDLC_ROOT" ] && [ -f "$LINEAR_SDLC_ROOT/VERSION" ] && return 0
+  return 1
+}
+
+# Read the local VERSION, stripping whitespace. Returns empty on any error.
+read_local_version() {
+  [ -n "${LINEAR_SDLC_ROOT:-}" ] || return 0
+  [ -f "$LINEAR_SDLC_ROOT/VERSION" ] || return 0
+  local v
+  v=$(head -n1 "$LINEAR_SDLC_ROOT/VERSION" 2>/dev/null | tr -d '[:space:]')
+  is_valid_version "$v" || return 0
+  printf '%s' "$v"
+}
+
+# Read a cached result if it's still fresh AND the local version matches
+# what we checked against last time. Prints the cached "EMIT" line (possibly
+# empty for UP_TO_DATE) and returns 0 on cache hit, returns 1 on miss.
+check_cache() {
+  local local_ver="$1"
+  [ "$FORCE" -eq 0 ] || return 1
+  [ -f "$CACHE_FILE" ] || return 1
+  local cached result cached_local cached_remote cached_ts age ttl
+  cached=$(head -n1 "$CACHE_FILE" 2>/dev/null || true)
+  # Cache line format: RESULT LOCAL REMOTE TS
+  set +u
+  set -- $cached
+  set -u
+  [ $# -eq 4 ] || return 1
+  result="$1"; cached_local="$2"; cached_remote="$3"; cached_ts="$4"
+  # Basic sanity checks.
+  is_valid_version "$cached_local" || return 1
+  is_valid_version "$cached_remote" || return 1
+  case "$cached_ts" in ''|*[!0-9]*) return 1 ;; esac
+  # If the on-disk VERSION has changed (e.g. user ran upgrade manually),
+  # the cache is stale no matter what.
+  [ "$cached_local" = "$local_ver" ] || return 1
+  age=$(( $(now) - cached_ts ))
+  [ $age -ge 0 ] || return 1
+  case "$result" in
+    UP_TO_DATE)
+      ttl=$TTL_UP_TO_DATE
+      [ $age -lt $ttl ] || return 1
+      # Cache hit, silent.
+      return 0
+      ;;
+    UPGRADE_AVAILABLE)
+      ttl=$TTL_UPGRADE_AVAILABLE
+      [ $age -lt $ttl ] || return 1
+      # Cache hit — re-emit the upgrade line (subject to snooze check below).
+      if check_snooze "$cached_remote"; then
+        return 0  # snoozed — stay silent
+      fi
+      printf 'UPDATE_AVAILABLE %s %s\n' "$cached_local" "$cached_remote"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+write_cache() {
+  local result="$1" local_ver="$2" remote_ver="$3"
+  mkdir -p "$STATE_DIR"
+  printf '%s %s %s %s\n' "$result" "$local_ver" "$remote_ver" "$(now)" > "$CACHE_FILE"
+}
+
+clear_cache() {
+  rm -f "$CACHE_FILE" 2>/dev/null || true
+}
+
+# Returns 0 if currently snoozed for this specific remote version, 1 otherwise.
+# Snooze file format: "<version> <level> <epoch_when_snoozed>".
+check_snooze() {
+  local remote_ver="$1"
+  [ "$FORCE" -eq 0 ] || return 1
+  [ -f "$SNOOZE_FILE" ] || return 1
+  local line snooze_ver level ts window age
+  line=$(head -n1 "$SNOOZE_FILE" 2>/dev/null || true)
+  set +u
+  set -- $line
+  set -u
+  [ $# -eq 3 ] || return 1
+  snooze_ver="$1"; level="$2"; ts="$3"
+  is_valid_version "$snooze_ver" || return 1
+  case "$level" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+  # A snooze only silences the exact version it was taken for.
+  # If the remote has moved on to a newer version, the snooze is void.
+  [ "$snooze_ver" = "$remote_ver" ] || return 1
+  case "$level" in
+    1) window=$SNOOZE_L1 ;;
+    2) window=$SNOOZE_L2 ;;
+    *) window=$SNOOZE_L3 ;;
+  esac
+  age=$(( $(now) - ts ))
+  [ $age -ge 0 ] || return 1
+  [ $age -lt $window ] || return 1
+  return 0
+}
+
+# Fetch remote VERSION. Prints the remote version on success, prints nothing
+# (and returns non-zero) on any failure: network error, timeout, HTTP error,
+# or invalid-looking body.
+fetch_remote_version() {
+  command -v curl >/dev/null 2>&1 || return 1
+  local body
+  body=$(curl -sfL --max-time "$CURL_TIMEOUT" "$UPDATE_URL" 2>/dev/null || true)
+  body=$(printf '%s' "$body" | tr -d '[:space:]')
+  is_valid_version "$body" || return 1
+  printf '%s' "$body"
+}
+
+# Compare two semver x.y.z strings. Returns 0 if a < b, 1 otherwise.
+version_lt() {
+  local a="$1" b="$2"
+  [ "$a" = "$b" ] && return 1
+  local ia ib
+  IFS=. read -r a1 a2 a3 <<EOF
+$a
+EOF
+  IFS=. read -r b1 b2 b3 <<EOF
+$b
+EOF
+  # Default missing fields to 0 so "2.1" vs "2.1.0" doesn't misbehave
+  # (is_valid_version rejects those, but keep it defensive).
+  a1=${a1:-0}; a2=${a2:-0}; a3=${a3:-0}
+  b1=${b1:-0}; b2=${b2:-0}; b3=${b3:-0}
+  if [ "$a1" -lt "$b1" ]; then return 0; fi
+  if [ "$a1" -gt "$b1" ]; then return 1; fi
+  if [ "$a2" -lt "$b2" ]; then return 0; fi
+  if [ "$a2" -gt "$b2" ]; then return 1; fi
+  if [ "$a3" -lt "$b3" ]; then return 0; fi
+  return 1
+}
+
+# ─── Main ───────────────────────────────────────────────────────
+
+# 1. Opt-out check.
+_OPT=$(config_get update_check)
+if [ "$_OPT" = "false" ]; then
+  exit 0
+fi
+
+# 2. Just-upgraded marker. Emit and delete, then fall through so we also
+#    refresh the cache (the upgrade itself should have cleared the cache
+#    but be defensive).
+if [ -f "$MARKER_FILE" ]; then
+  _M=$(head -n1 "$MARKER_FILE" 2>/dev/null || true)
+  set +u
+  set -- $_M
+  set -u
+  if [ $# -eq 2 ] && is_valid_version "$1" && is_valid_version "$2"; then
+    printf 'JUST_UPGRADED %s %s\n' "$1" "$2"
+  fi
+  rm -f "$MARKER_FILE" 2>/dev/null || true
+fi
+
+# 3. Resolve LINEAR_SDLC_ROOT and read local VERSION. If we can't find the
+#    local VERSION, we have nothing to compare against — exit silent.
+if ! resolve_root; then
+  exit 0
+fi
+LOCAL_VER=$(read_local_version)
+if [ -z "$LOCAL_VER" ]; then
+  exit 0
+fi
+
+# 4. Cache check. On a hit, check_cache already printed (or stayed silent)
+#    and we're done.
+if CACHE_OUT=$(check_cache "$LOCAL_VER"); then
+  [ -n "$CACHE_OUT" ] && printf '%s\n' "$CACHE_OUT"
+  exit 0
+fi
+
+# 5. Slow path: fetch the remote VERSION.
+REMOTE_VER=$(fetch_remote_version || true)
+if [ -z "$REMOTE_VER" ]; then
+  # Network failure. Treat as up-to-date so we don't block skills, but do
+  # NOT write a cache entry — that way the next invocation retries soon.
+  exit 0
+fi
+
+# 6. Compare and update cache.
+if version_lt "$LOCAL_VER" "$REMOTE_VER"; then
+  write_cache UPGRADE_AVAILABLE "$LOCAL_VER" "$REMOTE_VER"
+  if check_snooze "$REMOTE_VER"; then
+    exit 0  # snoozed — stay silent
+  fi
+  printf 'UPDATE_AVAILABLE %s %s\n' "$LOCAL_VER" "$REMOTE_VER"
+else
+  write_cache UP_TO_DATE "$LOCAL_VER" "$REMOTE_VER"
+fi
+
+exit 0
