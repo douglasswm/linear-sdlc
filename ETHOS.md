@@ -22,7 +22,7 @@ Do the whole thing. Don't skip the review step because it's "just a small change
 
 ## Right Model for the Job
 
-Not every task needs the most powerful model. Skills declare which Claude model and effort level they need. Creative and complex work (brainstorming, implementation) gets Opus with high effort. Mechanical tasks (ticket creation, health checks) get Sonnet. Simple lookups (next ticket) get Haiku. This saves cost and latency without sacrificing quality where it matters.
+Not every task needs the most powerful model. Skills declare which Claude model and effort level they need. Creative planning work (brainstorming) gets Opus for cross-domain synthesis, at medium effort since the human drives pacing. Full-lifecycle implementation gets Sonnet at medium effort — most tickets are small and the heavy reasoning happens in specialist sub-agents during self-review. Structured tasks (ticket creation, health checks) get Sonnet at medium effort. Simple lookups (next ticket) get Haiku. Defaults are tuned for typical workloads, not worst case — users escalate manually for genuinely architectural work. This saves cost and latency without sacrificing quality where it matters.
 
 ## Simplicity
 
