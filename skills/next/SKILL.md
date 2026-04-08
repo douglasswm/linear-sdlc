@@ -44,9 +44,6 @@ else
   echo "LEARNINGS: 0"
 fi
 
-_SESSION_ID="$$-$(date +%s)"
-lsdlc-timeline-log '{"skill":"next","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
-
 echo "---"
 ```
 

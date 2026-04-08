@@ -61,34 +61,24 @@ cd ~/.claude/skills/linear-sdlc
 
 1. **Skill symlinks.** For each `skills/<dir>/SKILL.md`, setup creates `~/.claude/skills/<dir>/` (a real directory) containing a `SKILL.md` symlink pointing back into this repo. For `/implement`, it also symlinks the `specialists/` subdirectory so the parallel sub-agent checklists resolve relative to the linked SKILL.md. With `--prefix`, names become `~/.claude/skills/linear-sdlc-<dir>/`.
 2. **`bin/` on PATH.** For each script in `bin/`, setup symlinks it into `~/.local/bin/`. Skills invoke them as bare commands (e.g., `lsdlc-linear get-issue VER-42`). If `~/.local/bin` is not on the user's `PATH`, setup warns once but does not mutate shell rc files.
-3. **API key.** Setup prompts for the Linear API key and writes it to `~/.linear-sdlc/env` with mode `0600`. The skill preamble sources this file unless `LINEAR_API_KEY` is already in the environment.
-4. **Team key.** Setup prompts for the Linear team key and saves it via `lsdlc-config set linear_team_id <KEY>`. Validated against `^[A-Z][A-Z0-9_-]{1,19}$`.
+3. **API key.** Setup prompts for the Linear API key and writes it to `~/.linear-sdlc/env` with mode `0600`. The shared preamble (`references/preamble.sh`) parses this file in pure shell to load `LINEAR_API_KEY` — it never `.`-sources the file, because that would be an RCE surface if another process tampered with it. It also refuses to read the file if it's group/other-writable or not owned by the current user.
+4. **Team ID.** Setup prompts for the Linear team identifier and saves it via `lsdlc-config set linear_team_id <VALUE>`. The field accepts either a short team key (e.g., `VER`) or a team UUID (e.g., `07877f05-4f32-42b4-a2df-9e1764316652`). `bin/lsdlc-linear` auto-detects the format via a UUID regex and builds the appropriate GraphQL filter (`team: { id: ... }` vs `team: { key: ... }`). If you add a new code path that filters by team, use the `teamFilter()` / `teamMatches()` helpers in `lsdlc-linear` — don't hardcode `key`.
 5. **Source dir.** Setup persists the absolute repo path via `lsdlc-config set source_dir "$SOURCE_DIR"` so the preamble's path resolver has a fallback if `readlink` fails.
 6. **MCP prompt (informational only).** Setup prints instructions for installing Linear's first-party HTTP MCP (`claude mcp add --transport http linear https://mcp.linear.app/mcp`) but never installs it. The skills don't depend on it.
 
-## How the preamble resolves `$LINEAR_SDLC_ROOT`
+## Preamble: bootstrap + shared source
 
-Each skill body starts with this block (also defined in `references/preamble.md`):
+Each skill body runs a two-step preamble in its very first bash block:
 
-```bash
-if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
-  for _candidate in "$HOME/.claude/skills/brainstorm/SKILL.md" \
-                    "$HOME/.claude/skills/linear-sdlc-brainstorm/SKILL.md"; do
-    if [ -L "$_candidate" ]; then
-      LINEAR_SDLC_ROOT="$(cd "$(dirname "$(readlink "$_candidate")")/../.." && pwd)"
-      break
-    fi
-  done
-  if [ -z "${LINEAR_SDLC_ROOT:-}" ]; then
-    LINEAR_SDLC_ROOT="$(lsdlc-config get source_dir 2>/dev/null || echo "")"
-  fi
-  export LINEAR_SDLC_ROOT
-fi
-```
+1. **Bootstrap** — ~12 lines inline in each `SKILL.md`. Resolves `LINEAR_SDLC_ROOT` from the skill's symlink target (probing both `~/.claude/skills/brainstorm/SKILL.md` and the `linear-sdlc-brainstorm` prefixed variant), falling back to `lsdlc-config get source_dir`. Exports `LINEAR_SDLC_ROOT`.
 
-It probes both prefixed and unprefixed symlink locations for the brainstorm skill, resolves the symlink to find `repo/skills/brainstorm/SKILL.md`, then walks up two levels to get the repo root. Falls back to `lsdlc-config get source_dir` if no symlink is found.
+2. **Source the shared preamble** — `SKILL_NAME=<name> . "$LINEAR_SDLC_ROOT/references/preamble.sh"`. This file holds the parts that every skill needs identically: safe `LINEAR_API_KEY` loading (no `.`-sourcing), git branch + project slug detection, state dir creation, and the `lsdlc-timeline-log` "started" event. Having one source of truth means the security-critical env loader and the project detection can't drift across skills.
+
+After sourcing, each `SKILL.md` prints its own info lines (learnings count, wiki pages, last session, checkpoints, last health score — whichever matter to that skill) and then `echo "---"`.
 
 Skills reference repo files like `$LINEAR_SDLC_ROOT/templates/spec-template.md`. **Do not** use `${CLAUDE_PLUGIN_ROOT}` — that's a v1 (plugin-era) variable and no longer set.
+
+**When editing the shared preamble:** changes to `references/preamble.sh` are picked up automatically by every skill on the next run — no per-skill edit or reinstall needed. The bootstrap block in each `SKILL.md` is intentionally minimal and should only change if the symlink layout changes.
 
 ## Linear access: `bin/lsdlc-linear`
 
@@ -103,7 +93,7 @@ The skills do not branch on whether the official Linear MCP server is installed.
 ```
 ~/.linear-sdlc/
 ├── env                                # LINEAR_API_KEY (mode 0600), if you used setup's prompt
-├── config.json                        # team ID, prefs, source_dir
+├── config.json                        # team id, prefs, source_dir
 └── projects/<slug>/                   # slug derived from git remote
     ├── learnings.jsonl                # append-only operational notes (with confidence decay)
     ├── timeline.jsonl                 # skill execution log
@@ -128,6 +118,12 @@ Override the state dir for tests: `LSDLC_STATE_DIR=/tmp/test-state ./setup`. All
     skills/ references/
   ```
   Should return zero hits. If anything turns up, that's a v1 leak.
+- **Verify no skill has drifted away from the shared preamble:**
+  ```bash
+  grep -rln 'preamble.sh' skills/   # expect exactly 7 files
+  grep -rn  'LINEAR_API_KEY' skills/  # expect zero hits — only the shared preamble loads it
+  ```
+  If a skill has its own env-sourcing block, fold it back into `references/preamble.sh` — we explicitly don't want the RCE-relevant code duplicated.
 
 ## Conventions
 

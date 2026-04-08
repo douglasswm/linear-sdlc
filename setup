@@ -359,6 +359,9 @@ HEADER_EOF
 fi
 
 # ─── Linear team ID prompt ─────────────────────────────────────
+# The value can be either a short team key (e.g., "VER") or a team UUID
+# (e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). bin/lsdlc-linear
+# auto-detects which form it is and picks the right GraphQL filter.
 EXISTING_TEAM="$(config_get linear_team_id)"
 if [ -n "$EXISTING_TEAM" ] && [ -t 0 ]; then
   printf "Linear team ID is set to '%s'. Replace? [y/N] " "$EXISTING_TEAM"
@@ -375,15 +378,21 @@ fi
 
 if [ "$NEED_TEAM" -eq 1 ]; then
   echo ""
-  echo "Linear team key (e.g., VER, ENG, PROD — find it in your team URL or settings):"
+  echo "Linear team ID — either the short team key (e.g., VER, ENG) or the"
+  echo "team UUID (e.g., 07877f05-4f32-42b4-a2df-9e1764316652). Find it in"
+  echo "your Linear team URL or settings."
   printf "  > "
   read -r _team_id </dev/tty 2>/dev/null || _team_id=""
   if [ -n "$_team_id" ]; then
-    if printf '%s' "$_team_id" | grep -qE '^[A-Z][A-Z0-9_-]{1,19}$'; then
+    # Accept either form:
+    #   short key:  2–20 chars, starts with uppercase letter, alphanumeric + _ -
+    #   team UUID:  8-4-4-4-12 hex digits (case-insensitive)
+    if printf '%s' "$_team_id" | grep -qE '^([A-Z][A-Z0-9_-]{1,19}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'; then
       config_set linear_team_id "$_team_id"
       log "  saved linear_team_id=$_team_id"
     else
-      warn "  invalid team key format — must match ^[A-Z][A-Z0-9_-]{1,19}$. Skipping."
+      warn "  invalid team ID format — must be a short team key (e.g., VER)"
+      warn "  or a team UUID (e.g., 07877f05-4f32-42b4-a2df-9e1764316652). Skipping."
     fi
   fi
 fi

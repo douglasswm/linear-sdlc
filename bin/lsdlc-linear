@@ -7,14 +7,17 @@
 //
 // Subcommands:
 //   lsdlc-linear whoami
-//   lsdlc-linear search-issues <query> [--team KEY] [--state open|closed|all] [--limit N]
-//   lsdlc-linear list-assigned         [--team KEY] [--status "Todo,Backlog"] [--limit N]
+//   lsdlc-linear search-issues <query> [--team KEY|UUID] [--state open|closed|all] [--limit N]
+//   lsdlc-linear list-assigned         [--team KEY|UUID] [--status "Todo,Backlog"] [--limit N]
 //   lsdlc-linear get-issue <ID>                                    # e.g. VER-42
 //   lsdlc-linear set-status <ID> <state-name>
 //   lsdlc-linear create-issue --title "T" --description "D"
-//                             [--team KEY] [--priority N]
+//                             [--team KEY|UUID] [--priority N]
 //                             [--labels l1,l2] [--parent VER-40]
 //   lsdlc-linear add-relation <ID> <relation> <other-ID>           # blocks | blockedBy
+//
+// --team accepts either the short team key (e.g., "VER") or the team UUID
+// (e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). Auto-detected by format.
 //
 // All output is JSON on stdout. Errors go to stderr.
 // Exit codes: 0 ok, 1 arg error, 2 API/network error, 3 auth (401/403).
@@ -33,6 +36,24 @@ const ENDPOINT = 'https://api.linear.app/graphql';
 function err(msg, code = 2) {
   process.stderr.write(`lsdlc-linear: ${msg}\n`);
   process.exit(code);
+}
+
+// ─── Team format detection ────────────────────────────────────
+// `--team` accepts either a short team key (e.g., "VER", "ENG") or a team
+// UUID (e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). The config field
+// `linear_team_id` can hold either form. All callers should use this helper
+// to build the correct GraphQL filter.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+function isUuid(s) { return typeof s === 'string' && UUID_RE.test(s); }
+function teamFilter(value) {
+  // Returns the object you can assign to `filter.team = ...`
+  return isUuid(value) ? { id: { eq: value } } : { key: { eq: value } };
+}
+function teamMatches(teamNode, value) {
+  // Client-side equivalent of teamFilter() for use with issueSearch results
+  // (Linear's issueSearch doesn't support a team filter argument).
+  if (!teamNode) return false;
+  return isUuid(value) ? teamNode.id === value : teamNode.key === value;
 }
 
 // ─── Resolve API key ──────────────────────────────────────────
@@ -164,7 +185,7 @@ async function cmdSearchIssues(args) {
     default: { limit: 20 },
   });
   const query = (flags._[0] || '').trim();
-  if (!query) err('usage: lsdlc-linear search-issues <query> [--team KEY] [--limit N]', 1);
+  if (!query) err('usage: lsdlc-linear search-issues <query> [--team KEY|UUID] [--limit N]', 1);
 
   // Use issueSearch for full-text search across the workspace
   const gql = `
@@ -176,7 +197,7 @@ async function cmdSearchIssues(args) {
           title
           state { name type }
           priority
-          team { key name }
+          team { id key name }
           url
         }
       }
@@ -185,7 +206,7 @@ async function cmdSearchIssues(args) {
   const data = await linear(gql, { query, first: flags.limit });
   let nodes = data.issueSearch.nodes;
   if (flags.team) {
-    nodes = nodes.filter(n => n.team && n.team.key === flags.team);
+    nodes = nodes.filter(n => teamMatches(n.team, flags.team));
   }
   printJson({ count: nodes.length, issues: nodes });
 }
@@ -205,7 +226,7 @@ async function cmdListAssigned(args) {
     state: { name: { in: statuses } },
   };
   if (flags.team) {
-    filter.team = { key: { eq: flags.team } };
+    filter.team = teamFilter(flags.team);
   }
 
   const gql = `
@@ -328,19 +349,24 @@ async function cmdCreateIssue(args) {
   const flags = parseFlags(args, {
     number: ['priority'],
   });
-  if (!flags.title) err('usage: lsdlc-linear create-issue --title "..." [--description "..."] [--team KEY] [--priority N] [--labels l1,l2] [--parent VER-40]', 1);
+  if (!flags.title) err('usage: lsdlc-linear create-issue --title "..." [--description "..."] [--team KEY|UUID] [--priority N] [--labels l1,l2] [--parent VER-40]', 1);
 
-  // Resolve team ID from key
+  // Resolve team ID. --team may be either a UUID (use directly) or a short
+  // key (look it up via the teams query first).
   let teamId;
   if (flags.team) {
-    const teams = await linear(
-      `query Teams($key: String!) {
-        teams(filter: { key: { eq: $key } }) { nodes { id key } }
-      }`,
-      { key: flags.team }
-    );
-    if (!teams.teams.nodes.length) err(`team not found: ${flags.team}`, 1);
-    teamId = teams.teams.nodes[0].id;
+    if (isUuid(flags.team)) {
+      teamId = flags.team;
+    } else {
+      const teams = await linear(
+        `query Teams($key: String!) {
+          teams(filter: { key: { eq: $key } }) { nodes { id key } }
+        }`,
+        { key: flags.team }
+      );
+      if (!teams.teams.nodes.length) err(`team not found: ${flags.team}`, 1);
+      teamId = teams.teams.nodes[0].id;
+    }
   } else {
     // Default to viewer's first team
     const v = await linear(`query { viewer { teams(first: 1) { nodes { id key } } } }`);
@@ -466,13 +492,16 @@ async function main() {
         '',
         'Subcommands:',
         '  whoami',
-        '  search-issues <query> [--team KEY] [--limit N]',
-        '  list-assigned         [--team KEY] [--status "Todo,Backlog"] [--limit N]',
+        '  search-issues <query> [--team KEY|UUID] [--limit N]',
+        '  list-assigned         [--team KEY|UUID] [--status "Todo,Backlog"] [--limit N]',
         '  get-issue <ID>',
         '  set-status <ID> <state-name>',
-        '  create-issue --title "..." [--description "..."] [--team KEY] [--priority N]',
+        '  create-issue --title "..." [--description "..."] [--team KEY|UUID] [--priority N]',
         '               [--labels l1,l2] [--parent VER-40]',
         '  add-relation <ID> <blocks|blockedBy> <other-ID>',
+        '',
+        '--team accepts either the short team key (e.g., "VER") or the team UUID',
+        '(e.g., "07877f05-4f32-42b4-a2df-9e1764316652"). Auto-detected by format.',
         '',
         'Reads LINEAR_API_KEY from env, falling back to ~/.linear-sdlc/env.',
         '',
