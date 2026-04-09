@@ -99,61 +99,122 @@ Analyze the spec and propose a ticket structure:
 
 Guidelines for breakdown:
 - Each sub-issue should be completable in 1-3 sessions
-- Each sub-issue should have clear acceptance criteria
+- Each sub-issue should have clear acceptance criteria. Draft at least 2–3 testable criteria per sub-issue during the breakdown — these become the `Acceptance criteria` checklist in the Linear description and the contract `/implement` checks against.
 - Identify the critical path (what must be done first)
 - Group related work (don't split a natural unit across tickets)
 
 ## Step 3: Confirm with User
 
-Present the proposed breakdown:
+Present the proposed breakdown **with the full acceptance-criteria checklist for every sub-issue**. This is the user's only chance to review the contract before it lands in Linear — `/implement` treats these criteria as binding in downstream steps, so they must be visible here, not summarized to a one-liner.
+
+Use the per-ticket block format below (not a markdown table — tables can't fit a multi-item checklist cleanly):
 
 ```
 ## Ticket Breakdown: Rate Limiting
 
 ### Parent Issue
 **Rate Limiting System** — Implement rate limiting across API endpoints
+- Priority: High
+- Labels: backend, security
 
-### Sub-Issues
+### Sub-Issue 1: Rate limiter middleware
+- Priority: High
+- Blocked by: none
+- Acceptance criteria:
+  - [ ] Middleware rejects requests over the configured limit with HTTP 429
+  - [ ] Limits are configurable per route without a code change
+  - [ ] Counter state survives process restarts (Redis-backed, not in-memory)
+  - [ ] Unit tests cover the sliding-window math and the over-limit path
 
-| # | Title | Priority | Dependencies | Acceptance Criteria |
-|---|-------|----------|-------------|---------------------|
-| 1 | Rate limiter middleware | High | None | Redis-based sliding window, configurable per-endpoint |
-| 2 | Apply rate limiting to auth endpoints | High | #1 | Login, register, password reset rate limited |
-| 3 | Rate limit response headers | Medium | #1 | X-RateLimit-* headers on all responses |
-| 4 | Rate limiting dashboard | Low | #1, #2 | Admin view of rate limit stats |
+### Sub-Issue 2: Apply rate limiting to auth endpoints
+- Priority: High
+- Blocked by: Sub-Issue 1
+- Acceptance criteria:
+  - [ ] Login, register, and password reset return 429 after the configured threshold
+  - [ ] Limits are tuned per endpoint, not inherited from the global default
+  - [ ] Integration test hits each endpoint repeatedly and asserts the 429
+
+### Sub-Issue 3: Rate limit response headers
+- Priority: Medium
+- Blocked by: Sub-Issue 1
+- Acceptance criteria:
+  - [ ] Every response includes `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+  - [ ] Headers reflect the actual per-endpoint config, not a global default
+  - [ ] Contract test locks the header names and formats
+
+### Sub-Issue 4: Rate limiting dashboard
+- Priority: Low
+- Blocked by: Sub-Issues 1, 2
+- Acceptance criteria:
+  - [ ] Admin view lists current rate-limit state per endpoint and client
+  - [ ] View is gated behind the existing admin auth middleware
 ```
+
+The acceptance criteria shown here must be **identical** to what will land in the Linear description in Step 4 — do not rewrite or expand them between Step 3 and Step 4. If the user asks to adjust a criterion in the "Adjust" path, loop back through Step 3 and re-present the updated block before proceeding.
 
 Use AskUserQuestion:
 ```
-**Re-ground:** Ready to create 4 tickets in Linear (1 parent + 3 sub-issues).
+**Re-ground:** Ready to create 4 tickets in Linear (1 parent + 3 sub-issues). The acceptance criteria above are the contract `/implement` will verify later — review them now.
 
 **Options:**
 1. **Create all** — Create these tickets as shown (recommended)
-2. **Adjust** — Modify the breakdown before creating
+2. **Adjust** — Modify the breakdown or acceptance criteria before creating
 3. **Cancel** — Don't create tickets yet
 
-**Recommendation:** Create all — we can always adjust tickets in Linear after creation.
+**Recommendation:** Create all — we can always adjust tickets in Linear after creation, but acceptance criteria are much cheaper to fix now than mid-implementation.
 ```
 
 ## Step 4: Create in Linear
 
-Run **all of Step 4 inside a single Bash tool call** — bash variables (like `$PARENT_ID`, `$CHILD1_ID`) do NOT persist across separate Bash tool calls. If you split this into multiple tool calls, the parent/child references will be empty and you will create orphaned issues.
+### 4a. Read the issue description template
 
-The pattern is: create parent → capture id → create each child with `--parent "$PARENT_ID"` → capture each child id → call `add-relation` for each blocking edge. All in one shell session.
+Every Linear issue this skill creates uses the shape defined in
+`$LINEAR_SDLC_ROOT/templates/issue-template.md`. Read that file **once** at the
+start of Step 4 — it contains the parent and sub-issue templates plus the
+rationale for each section. Draft every ticket's description by filling in the
+placeholders against the spec and the breakdown approved in Step 3.
+
+**Do not skip sections or inline one-line descriptions.** A sub-issue without a
+concrete `Acceptance criteria` checklist breaks `/implement`, which reads that
+checklist back when planning and verifying. If a section genuinely has nothing
+to say (e.g. an independent ticket has no `Blocked by`), write `none` rather
+than dropping the heading.
+
+### 4b. Run the creation in a single bash tool call
+
+Run **all of Step 4b inside a single Bash tool call** — bash variables (like `$PARENT_ID`, `$CHILD1_ID`) do NOT persist across separate Bash tool calls. If you split this into multiple tool calls, the parent/child references will be empty and you will create orphaned issues.
+
+The pattern is: draft each description as a heredoc → create parent → capture id → create each child with `--parent "$PARENT_ID"` → capture each child id → call `add-relation` for each blocking edge. All in one shell session.
 
 Linear priority numbers: `0` = no priority, `1` = urgent, `2` = high, `3` = medium, `4` = low.
 
-Template (substitute the actual title/description/priority/labels for each ticket from the breakdown approved in Step 3):
+**Heredoc safety:** always use single-quoted sentinels (`<<'PARENT_DESC_EOF'`), not bare ones. Single quotes disable shell interpolation so markdown characters — `` ` ``, `$`, `#`, `[`, backslashes — are passed through to Linear literally. A bare heredoc would try to expand `$foo` inside the description and corrupt it.
+
+Template (substitute the actual title/description/priority/labels for each ticket from the breakdown approved in Step 3; the description bodies below are illustrative and must follow `templates/issue-template.md`):
 
 ```bash
 TEAM=$(lsdlc-config get linear_team_id)
 
-# 1. Create the parent issue and capture its identifier.
-#    Use a heredoc-into-variable for the description so the body can span multiple lines safely.
+# 1. Parent description — follows the "Parent issue template" in templates/issue-template.md.
 PARENT_DESC=$(cat <<'PARENT_DESC_EOF'
-Implement rate limiting across API endpoints.
+## Problem
+Public API endpoints accept unlimited requests per client, leaving auth endpoints vulnerable to brute force and the service vulnerable to accidental traffic spikes from buggy integrations.
 
-Spec: specs/rate-limiting.md
+## Goal
+Every public API endpoint enforces a per-client rate limit backed by Redis, with clear `X-RateLimit-*` headers and an admin view for operators.
+
+## Scope
+- Rate limiter middleware
+- Apply rate limiting to auth endpoints
+- Rate limit response headers
+- Rate limiting dashboard
+
+## Out of scope
+- Per-plan / per-tier rate limits (follow-up)
+- Distributed rate limiting across regions
+
+## Spec
+`specs/rate-limiting.md`
 PARENT_DESC_EOF
 )
 PARENT_JSON=$(lsdlc-linear create-issue \
@@ -165,22 +226,71 @@ PARENT_JSON=$(lsdlc-linear create-issue \
 PARENT_ID=$(printf '%s' "$PARENT_JSON" | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(j.issue.identifier)')
 echo "Created parent: $PARENT_ID"
 
-# 2. Create each sub-issue, capturing its identifier into a per-child variable.
-#    Repeat this block for every sub-issue in the breakdown — one CHILDn pair per ticket.
+# 2. Sub-issue descriptions — one heredoc per child, each following the
+#    "Sub-issue template" in templates/issue-template.md. Repeat the
+#    CHILDn_DESC / CHILDn_JSON / CHILDn_ID triple for every sub-issue.
+CHILD1_DESC=$(cat <<'CHILD1_DESC_EOF'
+## Context
+Foundation ticket for the rate limiting epic. Introduces the shared middleware all other sub-issues wire into.
+
+## Requirements
+- Redis-backed sliding window counter
+- Per-endpoint configurable limits (requests + window)
+- Middleware hook that returns 429 with `Retry-After` when the limit is exceeded
+
+## Acceptance criteria
+- [ ] Middleware rejects requests over the configured limit with HTTP 429
+- [ ] Limits are configurable per route without a code change
+- [ ] Counter state survives process restarts (Redis-backed, not in-memory)
+- [ ] Unit tests cover the sliding-window math and the over-limit path
+
+## Implementation notes
+Lives in `src/middleware/rate-limit.ts`. Reuse the existing Redis client from `src/lib/redis.ts`. See the Technical Approach section of the spec for the sliding-window algorithm.
+
+## Dependencies
+- Blocked by: none
+
+## Spec
+`specs/rate-limiting.md`
+CHILD1_DESC_EOF
+)
 CHILD1_JSON=$(lsdlc-linear create-issue \
   --team "$TEAM" \
   --title "Rate limiter middleware" \
-  --description "Redis-based sliding window, configurable per-endpoint" \
+  --description "$CHILD1_DESC" \
   --priority 2 \
   --parent "$PARENT_ID" \
   --labels "backend")
 CHILD1_ID=$(printf '%s' "$CHILD1_JSON" | node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write(j.issue.identifier)')
 echo "Created child 1: $CHILD1_ID"
 
+CHILD2_DESC=$(cat <<'CHILD2_DESC_EOF'
+## Context
+Applies the middleware from the foundation ticket to the endpoints most at risk of brute-force abuse.
+
+## Requirements
+- Wire the rate limiter into `/auth/login`, `/auth/register`, `/auth/password-reset`
+- Use stricter limits than the default (per the spec's Technical Approach)
+
+## Acceptance criteria
+- [ ] Login, register, and password reset return 429 after the configured threshold
+- [ ] Limits are tuned per endpoint, not inherited from the global default
+- [ ] Integration test hits each endpoint repeatedly and asserts the 429
+
+## Implementation notes
+Wiring lives in `src/routes/auth.ts`. Pull the per-endpoint limits from config — don't hardcode.
+
+## Dependencies
+- Blocked by: the rate limiter middleware ticket (created above)
+
+## Spec
+`specs/rate-limiting.md`
+CHILD2_DESC_EOF
+)
 CHILD2_JSON=$(lsdlc-linear create-issue \
   --team "$TEAM" \
   --title "Apply rate limiting to auth endpoints" \
-  --description "Login, register, password reset rate limited" \
+  --description "$CHILD2_DESC" \
   --priority 2 \
   --parent "$PARENT_ID" \
   --labels "backend,security")
@@ -228,5 +338,5 @@ SUMMARY: Created 4 Linear tickets (VER-60 through VER-64) from specs/rate-limiti
 
 1. **Always confirm before creating.** Never create tickets without user approval of the breakdown.
 2. **Set dependencies accurately.** Wrong dependencies cause confusion when `/next` recommends tickets.
-3. **Keep descriptions actionable.** Each ticket's description should have enough context to implement without reading the full spec.
-4. **Link back to the spec.** Include the spec file path in the parent ticket description.
+3. **Every description follows `templates/issue-template.md`.** Parent issues: Problem / Goal / Scope / Out of scope / Spec. Sub-issues: Context / Requirements / Acceptance criteria / Implementation notes / Dependencies / Spec. A sub-issue without a concrete `Acceptance criteria` checklist is broken — `/implement` reads that checklist back when planning and verifying, and `/next` uses it to judge readiness.
+4. **Link back to the spec.** Every ticket's `Spec` section references the spec file path.
