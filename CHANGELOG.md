@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.4.0 — 2026-04-09 — `/update-tickets` retrofits stale Linear issue descriptions
+
+**New skill.** `v2.3.0` introduced `templates/issue-template.md` and rewrote `/create-tickets` to emit structured descriptions (parent: Problem / Goal / Scope / Out of scope / Spec; sub-issue: Context / Requirements / Acceptance criteria / Implementation notes / Dependencies / Spec). Issues created before that commit are stale — one-line paragraphs with no headings — and `/implement` can't plan against them because it reads the `Acceptance criteria` checklist back as a binding contract.
+
+`/update-tickets` closes that gap. Pass a single issue ID (`/update-tickets VER-42`), a parent ID (walks its children via the existing `get-issue` `children { nodes }` field), or a spec path (`/update-tickets specs/rate-limiting.md` finds every issue whose description literally contains the spec path). For each target, it:
+
+1. Detects staleness by checking for the expected headings (parents need `## Problem` / `## Goal` / `## Scope`, sub-issues need `## Context` and a non-empty `## Acceptance criteria` checklist) — on-template issues are skipped so re-runs are safe.
+2. Picks source material spec-first: if the description links a spec file, read it; otherwise use the user-supplied spec; otherwise fall back to reshaping the existing description (and calls this out to the user so they know no new information is being introduced).
+3. Drafts the refreshed description against `templates/issue-template.md`, preserving every existing `- [ ]` acceptance-criteria line verbatim.
+4. Shows a per-issue before/after diff and gates every mutation behind an `AskUserQuestion` with `Apply` / `Apply all remaining` / `Skip this one` / `Cancel`.
+5. Pushes approved drafts via the new `lsdlc-linear update-issue` subcommand, inside a single Bash call with `mktemp -d` staging so temp files clean up via `trap`.
+
+**New CLI.** `bin/lsdlc-linear update-issue <ID> [--title "..."] [--description-file PATH]`. Wraps Linear's `issueUpdate` GraphQL mutation for the title and description fields, mirroring the `set-status` mutation pattern. Description is read from a file (not argv) for the same reasons `document-upsert` uses `--content-file`: descriptions can be many KB of markdown with backticks / `$` / newlines, and passing them through shell quoting is awkward and risky. At least one of `--title` / `--description-file` is required. Inputs are validated locally before the API lookup to fail fast on a typo'd file path. The existing `LINEAR_API_KEY` safety invariant is preserved — the new subcommand reads nothing from argv that isn't already on argv (issue ID + title flag), file contents go through `fs.readFileSync`, and the key stays in `process.env`.
+
+**Model/effort.** Sonnet / medium, matching `/create-tickets` — same flavor of structured judgment, just reshaping instead of originating.
+
+**No `setup` changes needed.** `setup` already globs `skills/*/SKILL.md` and symlinks each one into `~/.claude/skills/`, so a fresh `./setup` run picks up the new skill automatically.
+
 ## v2.3.2 — 2026-04-09 — `lsdlc-linear create-project` unblocks `/wiki linear-setup`
 
 **Fix.** `/wiki linear-setup` has always offered "Create a new Project" as an option in its interactive picker, but `bin/lsdlc-linear` had no `create-project` subcommand to back it — picking that option would leave the skill with nothing to call. Users with no existing Linear Project could not bootstrap wiki sync.

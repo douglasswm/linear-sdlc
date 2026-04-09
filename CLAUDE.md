@@ -23,10 +23,12 @@ linear-sdlc/
 │   ├── lsdlc-session-update           # team-mode background worker (SessionStart hook)
 │   ├── lsdlc-settings-hook            # idempotent add/remove of SessionStart hook in ~/.claude/settings.json
 │   └── lsdlc-linear                   # Linear GraphQL helper (Node, zero deps). Includes
-│                                      #   document-upsert for one-way wiki → Linear sync.
+│                                      #   document-upsert for one-way wiki → Linear sync
+│                                      #   and update-issue for /update-tickets.
 ├── skills/
 │   ├── brainstorm/SKILL.md            # /brainstorm — feature planning (reads wiki prior art)
 │   ├── create-tickets/SKILL.md        # /create-tickets — spec → Linear issues
+│   ├── update-tickets/SKILL.md        # /update-tickets — refresh stale Linear issue descriptions to the template
 │   ├── next/SKILL.md                  # /next — pick next ticket
 │   ├── implement/
 │   │   ├── SKILL.md                   # /implement — full ticket lifecycle + auto wiki ingest
@@ -189,7 +191,7 @@ grep -rn 'lsdlc-update-check' skills/
   Should return zero hits. If anything turns up, that's a v1 leak.
 - **Verify no skill has drifted away from the shared preamble:**
   ```bash
-  grep -rln 'preamble.sh' skills/   # expect exactly 9 files (one per skill, incl. /wiki)
+  grep -rln 'preamble.sh' skills/   # expect exactly 10 files (one per skill, incl. /wiki and /update-tickets)
   grep -rn  'LINEAR_API_KEY' skills/  # expect zero hits — only the shared preamble loads it
   ```
   If a skill has its own env-sourcing block, fold it back into `references/preamble.sh` — we explicitly don't want the RCE-relevant code duplicated.

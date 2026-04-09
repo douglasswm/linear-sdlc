@@ -14,6 +14,7 @@
 //   lsdlc-linear create-issue --title "T" --description "D"
 //                             [--team KEY|UUID] [--priority N]
 //                             [--labels l1,l2] [--parent VER-40]
+//   lsdlc-linear update-issue <ID> [--title "..."] [--description-file PATH]
 //   lsdlc-linear add-relation <ID> <relation> <other-ID>           # blocks | blockedBy
 //
 //   lsdlc-linear list-projects   [--team KEY|UUID] [--limit N]
@@ -348,6 +349,64 @@ async function cmdSetStatus(args) {
       }
     }`,
     { id: lookup.issue.id, stateId: target.id }
+  );
+  printJson(update.issueUpdate);
+}
+
+// ─── Subcommand: update-issue ─────────────────────────────────
+// Refresh the title and/or description on an existing issue. Used by
+// /update-tickets to retrofit issues created before the structured
+// description template landed.
+//
+// Description is read from --description-file (not argv) to mirror
+// document-upsert — Linear issue descriptions can be many KB of markdown
+// with backticks, `$`, and newlines, and passing them through shell
+// quoting is awkward and error-prone. Title stays on argv because it's
+// short and single-line.
+//
+// At least one of --title / --description-file must be provided.
+async function cmdUpdateIssue(args) {
+  const flags = parseFlags(args, { default: {} });
+  const id = flags._[0];
+  if (!id) err('usage: lsdlc-linear update-issue <ID> [--title "..."] [--description-file PATH]', 1);
+  if (flags.title === undefined && flags['description-file'] === undefined) {
+    err('update-issue: at least one of --title / --description-file is required', 1);
+  }
+
+  // Validate inputs locally before any network call so a typo in a file
+  // path or a bad flag value fails fast without burning an API round-trip.
+  const input = {};
+  if (flags.title !== undefined) {
+    if (typeof flags.title !== 'string' || flags.title.trim() === '') {
+      err('--title must be a non-empty string', 1);
+    }
+    input.title = flags.title;
+  }
+  if (flags['description-file'] !== undefined) {
+    let content;
+    try { content = fs.readFileSync(flags['description-file'], 'utf8'); }
+    catch (e) { err(`cannot read description file: ${e.message}`, 1); }
+    input.description = content;
+  }
+
+  // Look up the issue so we fail with a friendly error for typo'd IDs
+  // and mutate by UUID (same pattern as set-status).
+  const lookup = await linear(
+    `query Lookup($id: String!) {
+      issue(id: $id) { id identifier title }
+    }`,
+    { id }
+  );
+  if (!lookup.issue) err(`issue not found: ${id}`, 1);
+
+  const update = await linear(
+    `mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue { id identifier title url state { name } }
+      }
+    }`,
+    { id: lookup.issue.id, input }
   );
   printJson(update.issueUpdate);
 }
@@ -754,6 +813,7 @@ async function main() {
         '  set-status <ID> <state-name>',
         '  create-issue --title "..." [--description "..."] [--team KEY|UUID] [--priority N]',
         '               [--labels l1,l2] [--parent VER-40]',
+        '  update-issue <ID> [--title "..."] [--description-file PATH]',
         '  add-relation <ID> <blocks|blockedBy> <other-ID>',
         '',
         'Project / document sync (used by /wiki sync-linear):',
@@ -781,6 +841,7 @@ async function main() {
       case 'get-issue':       await cmdGetIssue(rest); break;
       case 'set-status':      await cmdSetStatus(rest); break;
       case 'create-issue':    await cmdCreateIssue(rest); break;
+      case 'update-issue':    await cmdUpdateIssue(rest); break;
       case 'add-relation':    await cmdAddRelation(rest); break;
       case 'list-projects':   await cmdListProjects(rest); break;
       case 'get-project':     await cmdGetProject(rest); break;
