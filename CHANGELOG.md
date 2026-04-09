@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.3.1 — 2026-04-09 — Installer: heal broken symlinks from prior temp-dir installs
+
+**Fix.** `./setup` now replaces broken (dangling) skill symlinks instead of refusing to touch them. Users who previously installed via a temp-dir clone (`curl|bash`-style, PR test checkouts, etc.) had stale symlinks in `~/.claude/skills/<skill>/SKILL.md` pointing into a `/var/folders/.../tmp.XXX/repo/...` path that no longer exists. The pre-fix logic only replaced symlinks whose target started with the current `$SOURCE_DIR`, so a dangling link fell into the "foreign — refuse to clobber" branch and got skipped on every re-run.
+
+Now `link_skills()` detects broken symlinks (`[ -L ] && [ ! -e ]`) and replaces them unconditionally, while keeping the existing "don't clobber live foreign symlinks" safety rule intact. Applied consistently to the `SKILL.md` link, the `/implement` `specialists/` link, and `cleanup_opposite_mode()` (so transitioning between `--prefix` / `--no-prefix` also heals stale leftovers).
+
+Affected users just need to re-run `./setup` once.
+
 ## v2.3.0 — 2026-04-09 — LLM Wiki
 
 Implements the [llm_wiki pattern](thoughts/llm_wiki.md) as a first-class feature. Instead of re-deriving knowledge from raw sources on every query (RAG), linear-sdlc maintains a persistent, LLM-authored wiki that lives in the user's repo, follows a three-layer model (raw sources → wiki → schema), and is fed automatically by `/implement` and `/debug` on every successful completion.

@@ -228,35 +228,54 @@ link_skills() {
       skipped+=("$link_name")
       continue
     fi
-    # If it IS a symlink, only replace if it points back into our SOURCE_DIR.
+    # If it IS a symlink, decide whether to replace it:
+    #   - Broken (dangling) symlinks: always replace. They're not protecting
+    #     any real file, and this is exactly the shape left behind when a
+    #     previous install ran out of a temp-dir clone that's since been
+    #     deleted (curl|bash-style installs, PR test checkouts, etc).
+    #   - Live symlinks pointing back into our SOURCE_DIR: replace (normal
+    #     re-run of setup from the same checkout).
+    #   - Live symlinks pointing somewhere else: refuse — that's the user's
+    #     own install or another tool's, and clobbering it would be rude.
     if [ -L "$target/SKILL.md" ]; then
       local _existing
       _existing="$(readlink "$target/SKILL.md" 2>/dev/null || true)"
-      case "$_existing" in
-        "$SOURCE_DIR"/*) rm -f "$target/SKILL.md" ;;
-        *)
-          warn "Refusing to overwrite foreign symlink at $target/SKILL.md (-> $_existing)"
-          skipped+=("$link_name")
-          continue
-          ;;
-      esac
+      if [ ! -e "$target/SKILL.md" ]; then
+        log "  replacing broken symlink at $target/SKILL.md (was -> $_existing)"
+        rm -f "$target/SKILL.md"
+      else
+        case "$_existing" in
+          "$SOURCE_DIR"/*) rm -f "$target/SKILL.md" ;;
+          *)
+            warn "Refusing to overwrite foreign symlink at $target/SKILL.md (-> $_existing)"
+            skipped+=("$link_name")
+            continue
+            ;;
+        esac
+      fi
     fi
 
     mkdir -p "$target"
     ln -snf "$skill_dir/SKILL.md" "$target/SKILL.md"
 
     # /implement needs the specialists/ subdir resolvable next to SKILL.md.
-    # Same safety: only replace a symlink we own.
+    # Same safety as SKILL.md: replace broken symlinks unconditionally, replace
+    # live symlinks only if they point into our SOURCE_DIR.
     if [ -d "$skill_dir/specialists" ]; then
       if [ -L "$target/specialists" ]; then
         local _spec_existing
         _spec_existing="$(readlink "$target/specialists" 2>/dev/null || true)"
-        case "$_spec_existing" in
-          "$SOURCE_DIR"/*) rm -f "$target/specialists" ;;
-          *)
-            warn "Refusing to overwrite foreign specialists symlink at $target/specialists"
-            ;;
-        esac
+        if [ ! -e "$target/specialists" ]; then
+          log "  replacing broken specialists symlink at $target/specialists (was -> $_spec_existing)"
+          rm -f "$target/specialists"
+        else
+          case "$_spec_existing" in
+            "$SOURCE_DIR"/*) rm -f "$target/specialists" ;;
+            *)
+              warn "Refusing to overwrite foreign specialists symlink at $target/specialists"
+              ;;
+          esac
+        fi
       elif [ -e "$target/specialists" ]; then
         warn "Refusing to overwrite existing $target/specialists (not a symlink we own)"
       fi
@@ -286,19 +305,29 @@ cleanup_opposite_mode() {
       opposite_name="linear-sdlc-$dir_name"
     fi
     target="$CLAUDE_SKILLS_DIR/$opposite_name"
-    # Only remove if it points back into THIS repo (don't nuke unrelated user skills)
+    # Remove if: (a) it points back into THIS repo (normal prefix-mode flip),
+    # or (b) it's a broken symlink left behind by a vanished temp-dir install.
+    # Otherwise leave it alone — it might be an unrelated user skill.
     if [ -L "$target" ]; then
       local link_dest
       link_dest="$(readlink "$target" 2>/dev/null || true)"
-      case "$link_dest" in
-        "$SOURCE_DIR"/*) rm -f "$target"; removed+=("$opposite_name") ;;
-      esac
+      if [ ! -e "$target" ]; then
+        rm -f "$target"; removed+=("$opposite_name (broken)")
+      else
+        case "$link_dest" in
+          "$SOURCE_DIR"/*) rm -f "$target"; removed+=("$opposite_name") ;;
+        esac
+      fi
     elif [ -d "$target" ] && [ -L "$target/SKILL.md" ]; then
       local link_dest
       link_dest="$(readlink "$target/SKILL.md" 2>/dev/null || true)"
-      case "$link_dest" in
-        "$SOURCE_DIR"/*) rm -rf "$target"; removed+=("$opposite_name") ;;
-      esac
+      if [ ! -e "$target/SKILL.md" ]; then
+        rm -rf "$target"; removed+=("$opposite_name (broken)")
+      else
+        case "$link_dest" in
+          "$SOURCE_DIR"/*) rm -rf "$target"; removed+=("$opposite_name") ;;
+        esac
+      fi
     fi
   done
   if [ ${#removed[@]} -gt 0 ]; then
