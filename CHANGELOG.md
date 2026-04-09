@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.3.2 — 2026-04-09 — `lsdlc-linear create-project` unblocks `/wiki linear-setup`
+
+**Fix.** `/wiki linear-setup` has always offered "Create a new Project" as an option in its interactive picker, but `bin/lsdlc-linear` had no `create-project` subcommand to back it — picking that option would leave the skill with nothing to call. Users with no existing Linear Project could not bootstrap wiki sync.
+
+`bin/lsdlc-linear` now has a `create-project` subcommand that wraps Linear's `projectCreate` GraphQL mutation. Minimal field set by design: `--name` (required), `--team KEY|UUID[,KEY|UUID...]` (comma-separated for multi-team projects, falls back to the viewer's first team when omitted — same rule as `create-issue`), and optional `--description`. Output shape matches `list-projects` / `get-project` so the skill can parse `project.id` directly. `skills/wiki/SKILL.md` step 3 of `/wiki linear-setup` now wires the "Create a new Project" branch: prompt for a name via `AskUserQuestion`, call `lsdlc-linear create-project --name "<name>" --team "$(lsdlc-config get linear_team_id)"`, pull `project.id` from the JSON, save it via `lsdlc-config set wiki_linear_project_id <uuid>`.
+
+No new fields beyond name/team/description — extend when a concrete caller needs more, per the repo's "no speculative features" rule.
+
 ## v2.3.1 — 2026-04-09 — Installer: heal broken symlinks from prior temp-dir installs
 
 **Fix.** `./setup` now replaces broken (dangling) skill symlinks instead of refusing to touch them. Users who previously installed via a temp-dir clone (`curl|bash`-style, PR test checkouts, etc.) had stale symlinks in `~/.claude/skills/<skill>/SKILL.md` pointing into a `/var/folders/.../tmp.XXX/repo/...` path that no longer exists. The pre-fix logic only replaced symlinks whose target started with the current `$SOURCE_DIR`, so a dangling link fell into the "foreign — refuse to clobber" branch and got skipped on every re-run.

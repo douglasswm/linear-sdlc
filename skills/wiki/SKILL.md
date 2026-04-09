@@ -257,23 +257,28 @@ Push wiki pages to the configured Linear Project as Documents. One-way
 
 Interactive one-time setup for Linear sync.
 
-1. Run `lsdlc-linear list-projects` to fetch available Projects (this
-   subcommand is added alongside the /wiki work).
+1. Run `lsdlc-linear list-projects` to fetch available Projects.
 2. Parse the JSON output. Use `AskUserQuestion` to let the user pick one.
    Include "Create a new Project" as an option at the end.
-3. On selection, save the UUID:
+3. If the user picked an existing project, grab its UUID from the JSON.
+   If the user picked "Create a new Project":
+   - Ask for a project name (`AskUserQuestion`, free-form).
+   - Run `lsdlc-linear create-project --name "<name>" --team "<team>"`
+     where `<team>` is `$(lsdlc-config get linear_team_id)`.
+   - Parse `project.id` from the JSON output — that's the new UUID.
+4. Save the UUID:
    ```bash
    lsdlc-config set wiki_linear_project_id <uuid>
    lsdlc-config set wiki_linear_sync true
    ```
-4. Run a dry-run sync to confirm credentials and show the initial plan:
+5. Run a dry-run sync to confirm credentials and show the initial plan:
    ```bash
    lsdlc-wiki sync-linear --dry-run
    ```
-5. Ask the user if they want to enable auto-sync on every ingest:
+6. Ask the user if they want to enable auto-sync on every ingest:
    - "Auto-sync to Linear on every wiki write?"
    - Options: "No (Recommended) — manual /wiki sync-linear" / "Yes — auto"
-6. On yes: `lsdlc-config set wiki_linear_auto_sync true`
+7. On yes: `lsdlc-config set wiki_linear_auto_sync true`
 
 ---
 

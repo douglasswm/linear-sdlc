@@ -18,6 +18,8 @@
 //
 //   lsdlc-linear list-projects   [--team KEY|UUID] [--limit N]
 //   lsdlc-linear get-project     <project-uuid>
+//   lsdlc-linear create-project  --name "..." [--team KEY|UUID[,KEY|UUID...]]
+//                                [--description "..."]
 //   lsdlc-linear document-upsert --project-id <uuid> --id <doc-uuid>
 //                                --title <title> --content-file <path>
 //   lsdlc-linear document-delete <doc-uuid>
@@ -556,6 +558,60 @@ async function cmdListProjects(args) {
   printJson({ count: projects.length, projects });
 }
 
+// ─── Subcommand: create-project ───────────────────────────────
+// Creates a Linear Project. Used by /wiki linear-setup when the user picks
+// "Create a new Project" instead of an existing one, so the wiki has
+// somewhere to push documents to. Kept minimal — name + team(s) + optional
+// description. Extend as new callers need more fields; don't speculate.
+async function cmdCreateProject(args) {
+  const flags = parseFlags(args, { default: {} });
+  if (!flags.name) {
+    err('usage: lsdlc-linear create-project --name "..." [--team KEY|UUID[,KEY|UUID...]] [--description "..."]', 1);
+  }
+
+  // Resolve --team → teamIds[]. Accept a comma-separated list so a project
+  // can span multiple teams (Linear supports this). Each token is either a
+  // short key or a UUID, same rule as every other --team-accepting command.
+  // If --team is omitted, default to the viewer's first team (matches the
+  // create-issue fallback so behavior is consistent across the helper).
+  let teamIds = [];
+  if (flags.team) {
+    const tokens = String(flags.team).split(',').map(s => s.trim()).filter(Boolean);
+    for (const tok of tokens) {
+      if (isUuid(tok)) {
+        teamIds.push(tok);
+      } else {
+        const teams = await linear(
+          `query Teams($key: String!) {
+            teams(filter: { key: { eq: $key } }) { nodes { id key } }
+          }`,
+          { key: tok }
+        );
+        if (!teams.teams.nodes.length) err(`team not found: ${tok}`, 1);
+        teamIds.push(teams.teams.nodes[0].id);
+      }
+    }
+  } else {
+    const v = await linear(`query { viewer { teams(first: 1) { nodes { id key } } } }`);
+    if (!v.viewer.teams.nodes.length) err('no team specified and viewer has no teams', 1);
+    teamIds = [v.viewer.teams.nodes[0].id];
+  }
+
+  const input = { name: flags.name, teamIds };
+  if (flags.description) input.description = flags.description;
+
+  const result = await linear(
+    `mutation CreateProject($input: ProjectCreateInput!) {
+      projectCreate(input: $input) {
+        success
+        project { id name slugId url description state startDate targetDate }
+      }
+    }`,
+    { input }
+  );
+  printJson(result.projectCreate);
+}
+
 // ─── Subcommand: get-project ──────────────────────────────────
 // Fetches the project + the full list of its Documents. Documents are
 // paginated because a long-lived project can accumulate more than the
@@ -703,6 +759,7 @@ async function main() {
         'Project / document sync (used by /wiki sync-linear):',
         '  list-projects   [--team KEY|UUID] [--limit N]',
         '  get-project     <project-uuid>',
+        '  create-project  --name "..." [--team KEY|UUID[,KEY|UUID...]] [--description "..."]',
         '  document-upsert --project-id UUID --id UUID --title "..." --content-file PATH',
         '  document-delete <doc-uuid>',
         '',
@@ -727,6 +784,7 @@ async function main() {
       case 'add-relation':    await cmdAddRelation(rest); break;
       case 'list-projects':   await cmdListProjects(rest); break;
       case 'get-project':     await cmdGetProject(rest); break;
+      case 'create-project':  await cmdCreateProject(rest); break;
       case 'document-upsert': await cmdDocumentUpsert(rest); break;
       case 'document-delete': await cmdDocumentDelete(rest); break;
       default:
