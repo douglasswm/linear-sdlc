@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.4.1 — 2026-04-09 — `lsdlc-linear search-issues` switches to Linear's non-deprecated `searchIssues` root field
+
+**Fix.** Every call to `lsdlc-linear search-issues` was failing with `graphql error: deprecated`. Linear retired the `query` argument on the `issueSearch` root field — the field still appears non-deprecated in schema introspection, but any call that passes `query:` now returns a deprecation error at runtime. This broke `/brainstorm` prior-art lookups (`skills/brainstorm/SKILL.md:103`) and the spec-path branch of `/update-tickets` (`skills/update-tickets/SKILL.md:102`), and made `lsdlc-linear search-issues` unusable as a standalone helper.
+
+`bin/lsdlc-linear` now calls the modern `searchIssues(term: String!, filter: IssueFilter, first: Int)` field instead (verified against the live Linear schema via introspection). The subcommand's CLI shape is unchanged — the first positional is still the search term, `--team KEY|UUID` and `--limit N` still work, and the output JSON `{count, issues[]}` is identical — so every existing caller (skills + user scripts) keeps working without edits.
+
+`--team` filtering moves from client-side (post-fetch `teamMatches()`) to server-side via the `filter: IssueFilter` argument, using the existing `teamFilter()` helper. Practical consequence: `--limit` now reflects "up to N matches in that team" instead of "up to N matches anywhere, then trimmed to the team" — which is what callers were assuming anyway.
+
+No new subcommand, no new flag, no schema change. One bug, one function, one patched query.
+
 ## v2.4.0 — 2026-04-09 — `/update-tickets` retrofits stale Linear issue descriptions
 
 **New skill.** `v2.3.0` introduced `templates/issue-template.md` and rewrote `/create-tickets` to emit structured descriptions (parent: Problem / Goal / Scope / Out of scope / Spec; sub-issue: Context / Requirements / Acceptance criteria / Implementation notes / Dependencies / Spec). Issues created before that commit are stale — one-line paragraphs with no headings — and `/implement` can't plan against them because it reads the `Acceptance criteria` checklist back as a binding contract.

@@ -188,18 +188,27 @@ async function cmdWhoami() {
 }
 
 // ─── Subcommand: search-issues ────────────────────────────────
+// Full-text search across the workspace. Linear's old `issueSearch(query: ...)`
+// root field still exists in introspection but returns `graphql error: deprecated`
+// at runtime because the `query` argument itself was retired. The replacement is
+// `searchIssues(term: String!, filter: IssueFilter, ...)`, which returns the
+// same IssueConnection shape. We pass --team via the server-side `filter` arg
+// (using the shared teamFilter() helper) instead of client-side filtering —
+// that way --limit reflects issues-in-team rather than unfiltered-then-trimmed.
 async function cmdSearchIssues(args) {
   const flags = parseFlags(args, {
     number: ['limit'],
     default: { limit: 20 },
   });
-  const query = (flags._[0] || '').trim();
-  if (!query) err('usage: lsdlc-linear search-issues <query> [--team KEY|UUID] [--limit N]', 1);
+  const term = (flags._[0] || '').trim();
+  if (!term) err('usage: lsdlc-linear search-issues <query> [--team KEY|UUID] [--limit N]', 1);
 
-  // Use issueSearch for full-text search across the workspace
+  const variables = { term, first: flags.limit };
+  if (flags.team) variables.filter = { team: teamFilter(flags.team) };
+
   const gql = `
-    query Search($query: String!, $first: Int!) {
-      issueSearch(query: $query, first: $first) {
+    query Search($term: String!, $first: Int!, $filter: IssueFilter) {
+      searchIssues(term: $term, first: $first, filter: $filter) {
         nodes {
           id
           identifier
@@ -212,11 +221,8 @@ async function cmdSearchIssues(args) {
       }
     }
   `;
-  const data = await linear(gql, { query, first: flags.limit });
-  let nodes = data.issueSearch.nodes;
-  if (flags.team) {
-    nodes = nodes.filter(n => teamMatches(n.team, flags.team));
-  }
+  const data = await linear(gql, variables);
+  const nodes = data.searchIssues.nodes;
   printJson({ count: nodes.length, issues: nodes });
 }
 
