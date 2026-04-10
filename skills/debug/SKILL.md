@@ -62,7 +62,12 @@ Get a reliable, minimal reproduction. No analysis yet — just capture:
 2. The verbatim failing output (stack trace, error message, wrong value). Paste it into the response exactly as seen.
 3. The environment: branch, commit, relevant env vars, any non-default config.
 
-If you can't reproduce, stop and ask the user for a clearer repro before continuing.
+If you can't reproduce, capture the failure as a learning, then stop and
+ask the user for a clearer repro before continuing:
+
+```bash
+_lsdlc_capture_error step-1 "repro-failed" "Could not reproduce {bug-slug} with the steps the user provided. Asked for clarification on <missing piece>."
+```
 
 ## Step 2: Identify Component Boundaries
 
@@ -87,6 +92,13 @@ Add temporary logging, assertions, or prints **at each boundary** to observe the
 Re-run the repro with instrumentation in place. Capture the layered output. Walk through it from input to failure point and identify **the first boundary where data becomes wrong**. That boundary, not the crash site, is where the bug lives.
 
 If the output is ambiguous (wrong data at multiple places), add more instrumentation narrower to that region and re-run.
+
+If after two re-runs you still cannot localize the first wrong boundary,
+capture the failure and ask the user how to proceed:
+
+```bash
+_lsdlc_capture_error step-4 "boundary-walk-stuck" "Boundary walk failed to localize root cause for {bug-slug} after two passes. Possible candidates: <list>. Asked user to narrow."
+```
 
 ## Step 5: Hypothesize Root Cause
 

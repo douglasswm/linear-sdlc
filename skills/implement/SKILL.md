@@ -103,7 +103,26 @@ Before starting work, verify:
 3. **Blocker check** — Does the ticket have dependencies that aren't Done? Parse `relations.nodes[]` from `$TICKET_JSON` — for each relation where `type` is `blocks`, the `relatedIssue.state.name` should be `Done` or `Cancelled`. Display any unresolved blockers and offer to work on a blocker instead or override.
 4. **Working tree check** — Is the working tree clean? If dirty, ask to stash or commit first.
 
-If any check fails critically, report BLOCKED status and exit.
+If any check fails critically, capture the failure as a learning before
+reporting BLOCKED:
+
+```bash
+# Pick the right key for the specific failure
+case "$FAILURE" in
+  ticket-not-found)
+    _lsdlc_capture_error step-3 "ticket-fetch-failed" "lsdlc-linear get-issue $TICKET_ID failed — ticket missing or API key invalid. Verify identifier and re-run."
+    ;;
+  unresolved-blockers)
+    _lsdlc_capture_error step-3 "blocker-cycle" "Ticket $TICKET_ID has unresolved blockers. Work on the blocker first or break the cycle in Linear."
+    ;;
+  dirty-tree)
+    _lsdlc_capture_error step-3 "dirty-working-tree" "Working tree dirty when starting $TICKET_ID. Stash or commit before /implement."
+    ;;
+esac
+```
+
+Then report the BLOCKED status (per `references/completion-status.md`)
+and exit.
 
 ## Step 4: Start Work
 
@@ -240,7 +259,12 @@ Then walk through this checklist aloud, one line at a time:
 - [ ] Every new function/class has at least one call site (unless it's a public API entry point)
 - [ ] Every new file is imported, routed, or otherwise referenced from existing code
 
-If any item fails, report the gap and use `AskUserQuestion`:
+If any item fails, capture the gap as a learning, then report the gap
+and use `AskUserQuestion`:
+
+```bash
+_lsdlc_capture_error step-7e "completeness-gap" "Completeness check failed for $TICKET_ID at item: <which item>. Followed up with <choice>."
+```
 
 ```
 **Re-ground:** Completeness check surfaced a gap before PR creation.

@@ -131,6 +131,44 @@ unset _WIKI_UPGRADE_MARKER
 _SESSION_ID="$$-$(date +%s)"
 lsdlc-timeline-log "{\"skill\":\"$SKILL_NAME\",\"event\":\"started\",\"branch\":\"$_BRANCH\",\"session\":\"$_SESSION_ID\"}" 2>/dev/null &
 
+# ─── Error capture helper ──────────────────────────────────────
+# Skills call this explicitly at known failure points (right before
+# reporting STATUS: BLOCKED or STATUS: DONE_WITH_CONCERNS) to record
+# what went wrong as a learning + a timeline event. The function is
+# call-site driven by design — a global `trap ERR` would fire on every
+# harmless `grep` no-match and pollute the learnings file.
+#
+# Usage:
+#   _lsdlc_capture_error <step> <key> <insight>
+#
+#   <step>    — short label for where in the skill it failed
+#               (e.g. "step-4b" or "specialist-review")
+#   <key>     — stable slug for this failure mode
+#               (e.g. "linear-401-from-stale-key"). Same key on a re-run
+#               appends another row but lsdlc-learnings-search dedups by
+#               key+type at read time, so noise is bounded.
+#   <insight> — one sentence: what failed and what fixed it / what to
+#               try next time. No stack traces, no secrets, no argv dumps.
+#
+# Storage: writes to learnings.jsonl (per-project state dir, with
+# type:"error") AND lsdlc-timeline-log. Does NOT write to
+# .linear-sdlc/wiki/log.md — that file is committed to the repo and
+# operational failures don't belong in git history.
+_lsdlc_capture_error() {
+  local step="${1:-unknown}" key="${2:-unknown}" insight="${3:-}"
+  [ -z "$insight" ] && return 0
+  local payload
+  payload=$(node -e '
+    const [skill, step, key, insight] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({
+      skill, type: "error", step, key, insight,
+      confidence: 5, source: "observed"
+    }));
+  ' "$SKILL_NAME" "$step" "$key" "$insight" 2>/dev/null)
+  [ -n "$payload" ] && lsdlc-learnings-log "$payload" 2>/dev/null || true
+  lsdlc-timeline-log "{\"skill\":\"$SKILL_NAME\",\"event\":\"error\",\"step\":\"$step\",\"key\":\"$key\",\"branch\":\"$_BRANCH\",\"session\":\"$_SESSION_ID\"}" 2>/dev/null || true
+}
+
 # ─── Update check ──────────────────────────────────────────────
 # Runs last so it never delays the security/env path or project detection.
 # lsdlc-update-check is silent on the happy path and exits 0 on any failure,

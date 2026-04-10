@@ -77,6 +77,14 @@ command -v knip >/dev/null && echo "DEADCODE: knip"
 
 Report which tools were detected and which are missing.
 
+If **zero** quality tools are detected, capture it as a learning before
+falling back to NEEDS_CONTEXT — a project with no test/lint/typecheck
+toolchain is a real signal that future skills will struggle:
+
+```bash
+_lsdlc_capture_error step-1 "no-tools-detected" "/health found no test, lint, or typecheck tools in this project. Other skills (/implement Step 7 specialist review, /ship CI gate) will have nothing to run. Suggest setting at least one of: pytest, jest, vitest, eslint, ruff, tsc, mypy."
+```
+
 ## Step 2: Run Each Check
 
 For each detected tool, run it and capture results:

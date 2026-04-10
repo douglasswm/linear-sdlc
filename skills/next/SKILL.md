@@ -93,6 +93,14 @@ lsdlc-linear list-assigned $TEAM_FLAG --status "Todo,Backlog" --limit 20 | node 
 
 If user provides filters (project, cycle, label) in their prompt, narrow the results in your post-processing — Linear's filter syntax for these is more elaborate than the simple flags `lsdlc-linear` exposes.
 
+If `lsdlc-linear list-assigned` returns non-zero (Linear unreachable, key
+invalid), capture the failure and report BLOCKED with a recovery
+suggestion:
+
+```bash
+_lsdlc_capture_error step-2 "linear-list-failed" "lsdlc-linear list-assigned failed during /next. Likely cause: <network|api-key|team-config>. User cannot pick a ticket until Linear is reachable."
+```
+
 ## Step 3: Filter and Rank
 
 Filter out tickets that:

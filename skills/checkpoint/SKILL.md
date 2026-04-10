@@ -165,6 +165,13 @@ Diffstat (`git diff --stat`):
 
 Save to: `$_PROJ/checkpoints/${TIMESTAMP}-${TITLE}.md`
 
+If the write fails (filesystem error, permissions on `$_PROJ`), capture
+and report BLOCKED:
+
+```bash
+_lsdlc_capture_error save-step-3 "checkpoint-write-failed" "Could not write checkpoint file to $_PROJ/checkpoints/. Check that ~/.linear-sdlc/projects/$_SLUG/ exists and is writable."
+```
+
 ### Step 4: Confirm
 
 ```
