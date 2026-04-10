@@ -62,6 +62,44 @@ If no topic was provided, use AskUserQuestion:
 **Context:** Tell me what you'd like to build. A sentence or two is fine — we'll flesh it out together.
 ```
 
+## Step 1.4: Ground in the Project Charter
+
+If `docs/CHARTER.md` exists, read it and surface vision + non-goals to
+the user **before** running the wiki search. The charter sets the
+project's long-term shape; brainstorming a feature that contradicts a
+non-goal or wanders away from the vision is exactly what this step
+prevents.
+
+```bash
+if [ -f docs/CHARTER.md ]; then
+  echo "FOUND charter — reading vision and non-goals"
+fi
+```
+
+If the file exists, use the `Read` tool to read it. Then surface a 4–6
+line grounding to the user:
+
+```
+## Project charter context
+
+**Vision:** {one-sentence quote from the Vision section}
+
+**Relevant non-goals:**
+- {non-goal 1 — only if relevant to the topic}
+- {non-goal 2 — only if relevant to the topic}
+
+This feature should advance the vision and avoid the non-goals above.
+Anything in the discussion that conflicts with these, I'll flag.
+```
+
+If the topic clearly conflicts with a non-goal, raise it explicitly with
+`AskUserQuestion` before continuing — the user may want to update the
+charter, narrow the feature, or cancel the brainstorm.
+
+If `docs/CHARTER.md` does not exist, skip this step silently. (For
+greenfield projects, suggest running `/kickoff` first only if the user's
+topic sounds like a whole project rather than a feature.)
+
 ## Step 1.5: Read Prior Art from the Wiki
 
 Before searching Linear, check whether the wiki already has relevant
@@ -117,6 +155,14 @@ lsdlc-linear search-issues "$TOPIC" --limit 10 | node -e '
 
 - Search by keywords from the topic
 - Linear's full-text search covers open and closed issues by default
+
+If `lsdlc-linear search-issues` exits non-zero (network down, API key
+invalid), capture it and proceed without the duplicate check rather
+than blocking the entire brainstorm:
+
+```bash
+_lsdlc_capture_error step-2 "linear-search-failed" "lsdlc-linear search-issues failed during /brainstorm. Skipped duplicate check, continued brainstorming. Re-run /next or /create-tickets later when Linear is reachable."
+```
 
 If similar tickets exist, present them:
 ```
@@ -181,14 +227,43 @@ Use `AskUserQuestion` to pick an approach. Recommend one and say why.
 
 For each section: describe it, show a diagram or code snippet if it helps, then ask "Looks good? Anything to adjust before the next section?"
 
-**3d. Self-review checklist.** Before writing the spec file, walk through this checklist aloud with the user. If any item fails, fix it before continuing:
+**3d. Capture structural decisions as ADRs.** Any decision from steps
+3b–3c that meets all of the following becomes an Architecture Decision
+Record, written to `docs/adr/NNNN-<slug>.md`, **not** inlined in the
+spec:
+
+- It's a structural choice (framework, data store, protocol, deployment model)
+- The reasoning is non-obvious — the next reader six months from now would ask "why did we pick this?"
+- The trade-offs are real (option B was viable; we picked A for specific reasons)
+
+For each qualifying decision:
+
+```bash
+mkdir -p docs/adr
+NEXT_NNNN=$(printf '%04d' $(( $(ls docs/adr/ 2>/dev/null | grep -c '^[0-9]') + 1 )))
+SLUG="postgres-over-mysql"  # substitute
+echo "Will write docs/adr/${NEXT_NNNN}-${SLUG}.md"
+```
+
+Read `$LINEAR_SDLC_ROOT/templates/adr-template.md`, fill it with the
+context / decision / alternatives / consequences from the trade-off
+table in 3b, and write it. Use `AskUserQuestion` to confirm before
+writing each ADR — the user may want to defer a decision rather than
+lock it in here.
+
+Routine implementation choices (variable names, test framework already
+in use, library version bumps) are **not** ADRs. When in doubt, leave it
+as an inline note in the spec.
+
+**3e. Self-review checklist.** Before writing the spec file, walk through this checklist aloud with the user. If any item fails, fix it before continuing:
 
 - [ ] Every acceptance criterion the user mentioned has a concrete home in the design
 - [ ] No placeholder text, no `TODO`, no "we'll figure this out later"
 - [ ] Open questions are explicitly listed in the spec (under "Open Questions"), not hidden
 - [ ] Scope boundaries — what's explicitly **out** of V1 — are named
+- [ ] Structural decisions either have an ADR (per 3d) or are deliberately deferred with a TODO ADR in Open Questions
 
-**3e. Continue to Step 5** (skip Step 4 — the deep-design flow already covered the discussion).
+**3f. Continue to Step 5** (skip Step 4 — the deep-design flow already covered the discussion).
 
 ## Step 4: Guided Discussion
 
@@ -214,6 +289,13 @@ Create the spec file:
 5. Write to `specs/{slug}.md`
 
 Present the spec to the user for review. Ask if they want to adjust anything.
+
+If the spec write fails (filesystem error, permissions), capture and
+report BLOCKED:
+
+```bash
+_lsdlc_capture_error step-5 "spec-write-failed" "Could not write specs/<slug>.md. Reason: <one-line>. Check filesystem permissions or that no editor has the file open."
+```
 
 ## Step 6: Next Steps
 

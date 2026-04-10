@@ -51,3 +51,47 @@ External services, libraries, or other tickets that must be completed first?
 ## Out of Scope
 
 What are we explicitly NOT doing in this iteration?
+
+---
+
+The sections below are **optional**. Include them when the work is
+greenfield or strategically important; omit them for routine feature
+adds. `/brainstorm` decides whether to fill them based on the discussion
+and on whether `docs/CHARTER.md` exists.
+
+## Personas *(optional)*
+
+Who is this for? Link to one or more persona files, or describe inline
+if the project does not yet maintain `docs/personas/`.
+
+- [<persona name>](../docs/personas/<slug>.md)
+- *Or:* {role} — {one-line context}
+
+## Success metrics *(optional)*
+
+How will we know this worked? One to three measurable outcomes with a
+target number and a measurement source.
+
+- {metric} — target {number} measured by {source}
+
+## Non-goals *(optional)*
+
+Broader than "Out of Scope". Out of Scope is what we're deferring from
+*this iteration*; Non-goals are things this feature deliberately will
+*never* do.
+
+- {thing this feature deliberately will not do}
+
+## Risks & assumptions *(optional)*
+
+- **Risk:** {what could go wrong} — {mitigation}
+- **Assumption:** {what we're betting on} — {how we'd know if it's wrong}
+
+## Rollout *(optional)*
+
+How does this ship safely?
+
+- **Feature flag:** {flag name, default state}
+- **Rollout %:** {staged percentages or "all at once"}
+- **Migration:** {data or schema migrations needed}
+- **Rollback path:** {how we revert if things go sideways}

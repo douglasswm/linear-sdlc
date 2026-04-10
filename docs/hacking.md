@@ -26,8 +26,9 @@ linear-sdlc/
 │                                      #   document-upsert for one-way wiki → Linear sync
 │                                      #   and update-issue for /update-tickets.
 ├── skills/
-│   ├── brainstorm/SKILL.md            # /brainstorm — feature planning (reads wiki prior art)
-│   ├── create-tickets/SKILL.md        # /create-tickets — spec → Linear issues
+│   ├── kickoff/SKILL.md               # /kickoff — day-zero project charter + personas
+│   ├── brainstorm/SKILL.md            # /brainstorm — feature planning (reads charter + wiki prior art)
+│   ├── create-tickets/SKILL.md        # /create-tickets — spec → Linear issues (loads issue-type overlays)
 │   ├── update-tickets/SKILL.md        # /update-tickets — refresh stale Linear issue descriptions to the template
 │   ├── next/SKILL.md                  # /next — pick next ticket
 │   ├── implement/
@@ -43,14 +44,22 @@ linear-sdlc/
 │   ├── health/SKILL.md                # /health — code quality dashboard (+ wiki row)
 │   └── upgrade/SKILL.md               # /upgrade — autoupdate dialog + git upgrade
 ├── references/
-│   ├── preamble.sh                    # shared bash preamble + _WIKI resolution
+│   ├── preamble.sh                    # shared bash preamble + _WIKI resolution + _lsdlc_capture_error helper
 │   ├── wiki-schema-template.md        # CLAUDE.md template scaffolded into <wiki>/CLAUDE.md
 │   ├── ask-user-format.md             # AskUserQuestion template
-│   ├── completion-status.md           # STATUS protocol
+│   ├── completion-status.md           # STATUS protocol (BLOCKED/DONE_WITH_CONCERNS require error capture)
 │   └── verification-gate.md           # evidence-first claim pattern
 ├── templates/
 │   ├── spec-template.md               # written by /brainstorm, read by /create-tickets
-│   └── issue-template.md              # structured issue-description template
+│   ├── issue-template.md              # base parent + sub-issue shapes
+│   ├── charter-template.md            # day-zero project charter (written by /kickoff)
+│   ├── persona-template.md            # written by /kickoff inline, referenced by story overlay
+│   ├── adr-template.md                # written by /brainstorm deep-design mode
+│   └── issue-types/                   # type-specific overlays applied on top of issue-template.md
+│       ├── epic.md                    #   parent + Outcome / KPIs / Personas served / Milestones / Risks
+│       ├── story.md                   #   sub-issue + Gherkin AC + Designs / Telemetry / Copy
+│       ├── bug.md                     #   sub-issue + Steps to reproduce / Expected / Actual / Severity
+│       └── spike.md                   #   sub-issue + Question / Time-box / Deliverable / Decision criteria
 ├── docs/
 │   └── hacking.md                     # this file
 ├── README.md                          # user-facing
@@ -96,6 +105,87 @@ After sourcing, each `SKILL.md` prints its own info lines (learnings count, wiki
 Skills reference repo files like `$LINEAR_SDLC_ROOT/templates/spec-template.md`. **Do not** use `${CLAUDE_PLUGIN_ROOT}` — that's a v1 (plugin-era) variable and no longer set.
 
 **When editing the shared preamble:** changes to `references/preamble.sh` are picked up automatically by every skill on the next run — no per-skill edit or reinstall needed. The bootstrap block in each `SKILL.md` is intentionally minimal and should only change if the symlink layout changes.
+
+## Greenfield flow: `/kickoff` → `/brainstorm` → `/create-tickets`
+
+A brand-new project enters linear-sdlc via three skills run in order:
+
+1. **`/kickoff`** runs once at day zero. Walks the user through vision,
+   personas (1–3, authored inline from `templates/persona-template.md`),
+   success metrics, constraints, MVP, non-goals, tech-stack sketch,
+   risks, open questions. Writes `docs/CHARTER.md` from
+   `templates/charter-template.md` and `docs/personas/*.md` files. Hands
+   off to `/brainstorm` but does **not** auto-invoke it.
+
+2. **`/brainstorm`** Step 1.4 reads `docs/CHARTER.md` if it exists and
+   surfaces vision + relevant non-goals to ground the spec discussion.
+   In deep-design mode (Step 3), structural decisions become ADRs
+   written to `docs/adr/NNNN-<slug>.md` from `templates/adr-template.md`
+   instead of being inlined in the spec.
+
+3. **`/create-tickets`** Step 4a loads any type-specific overlay from
+   `templates/issue-types/<type>.md` based on the planned ticket's
+   labels (`epic`, `story`, `bug`, `spike`). See "Issue-type overlay
+   convention" below.
+
+`/kickoff` is **not** a hidden branch inside `/brainstorm`. The two are
+separate skills because kickoff runs once per project while brainstorm
+runs many times — a Step-0 branch in brainstorm would make every
+brainstorm pay context cost for a check that almost never fires. Plus
+the artifacts are different (foundational `docs/CHARTER.md` vs
+per-feature `specs/<slug>.md`).
+
+## Issue-type overlay convention
+
+`templates/issue-template.md` defines two **base** shapes — parent and
+sub-issue. `templates/issue-types/` holds **overlays** that extend those
+shapes when a ticket has a matching type label:
+
+- `epic.md` — extends the parent shape (Outcome / KPIs / Personas served / Milestones / Risks)
+- `story.md` — extends the sub-issue shape (User story header, Gherkin acceptance criteria, Designs / Telemetry / Copy)
+- `bug.md` — extends the sub-issue shape (Steps to reproduce / Expected / Actual / Environment / Severity / Suspected root cause)
+- `spike.md` — extends the sub-issue shape (Question / Time-box / Deliverable / Decision criteria)
+
+`/create-tickets` Step 4a loads only the overlays the planned breakdown
+actually uses, then merges them on top of the base shape. `/update-tickets`
+Step 3a classifies each target by its labels and applies the same
+overlay. Tickets with no type label use the base shape unchanged — full
+backwards compatibility with legacy issues.
+
+**Adding a new overlay:** drop `templates/issue-types/<new>.md`,
+update `/create-tickets` Step 2 "Picking a ticket type" and Step 4a
+merge rules, update `/update-tickets` Step 3a stale test, and add the
+new entry to `templates/issue-template.md`'s "Overlays" header.
+
+## Error capture: `_lsdlc_capture_error`
+
+`references/preamble.sh` defines a shell function every skill has in
+scope after sourcing the preamble:
+
+```bash
+_lsdlc_capture_error <step> <key> <insight>
+```
+
+It writes a `type:"error"` row to `learnings.jsonl` (per-project local
+state) **and** a timeline event. Skills call it explicitly at known
+failure points right before reporting `STATUS: BLOCKED` or
+`STATUS: DONE_WITH_CONCERNS` — the call is required by the status
+protocol in `references/completion-status.md`.
+
+Why call-site driven and not a global `trap ERR`? A blanket trap would
+fire on every harmless `grep` no-match and pollute the learnings file.
+Skills decide which failures are worth remembering.
+
+**Why not the wiki log?** `lsdlc-wiki log-append` writes to
+`.linear-sdlc/wiki/log.md`, which is committed to the repo. Stack
+traces, file paths, argv dumps, and customer-environment details would
+leak into git history. Errors stay in `~/.linear-sdlc/projects/<slug>/learnings.jsonl`
+(local state, never committed). The wiki log is for *intentional*
+content (ingests, queries, lints), not operational failures.
+
+The next session sees prior errors automatically through the
+3-line learnings preview at the top of every skill run, and via
+`lsdlc-learnings-search --type error` for explicit lookups.
 
 ## Linear access: `bin/lsdlc-linear`
 

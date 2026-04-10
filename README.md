@@ -17,7 +17,7 @@ A complete SDLC workflow for teams using Linear + Claude Code. Ticket-driven dev
 
 Open Claude Code and paste the prompt below verbatim. Claude runs the clone + setup for you, then writes a short `linear-sdlc` section into your `~/.claude/CLAUDE.md` so future sessions know the skills exist.
 
-> Install linear-sdlc: run **`git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup --skip-api-key --skip-mcp-prompt`** then add a "linear-sdlc" section to `~/.claude/CLAUDE.md` that lists the available skills: /brainstorm, /create-tickets, /update-tickets, /next, /implement, /debug, /wiki, /checkpoint, /health, /upgrade, and notes that each loads project context (learnings, wiki, timeline) from `~/.linear-sdlc/projects/<slug>/` and `<repo>/.linear-sdlc/wiki/`. Then tell me to run `cd ~/.claude/skills/linear-sdlc && ./setup` once in a terminal to enter my Linear API key (from https://linear.app/settings/api) and team ID. Finally, ask me if I also want to install Linear's official HTTP MCP server for ad-hoc Linear queries (`claude mcp add --transport http linear https://mcp.linear.app/mcp`).
+> Install linear-sdlc: run **`git clone --single-branch --depth 1 https://github.com/douglasswm/linear-sdlc.git ~/.claude/skills/linear-sdlc && cd ~/.claude/skills/linear-sdlc && ./setup --skip-api-key --skip-mcp-prompt`** then add a "linear-sdlc" section to `~/.claude/CLAUDE.md` that lists the available skills: /kickoff, /brainstorm, /create-tickets, /update-tickets, /next, /implement, /debug, /wiki, /checkpoint, /health, /upgrade, and notes that each loads project context (learnings, wiki, timeline) from `~/.linear-sdlc/projects/<slug>/` and `<repo>/.linear-sdlc/wiki/`. Then tell me to run `cd ~/.claude/skills/linear-sdlc && ./setup` once in a terminal to enter my Linear API key (from https://linear.app/settings/api) and team ID. Finally, ask me if I also want to install Linear's official HTTP MCP server for ad-hoc Linear queries (`claude mcp add --transport http linear https://mcp.linear.app/mcp`).
 
 This runs the non-interactive parts of setup (skill symlinks, bin linking, directory creation) inside Claude Code. The secrets-handling step — API key + team ID — is left to you, in a real terminal, so your credentials never flow through the chat history.
 
@@ -69,7 +69,7 @@ git pull
 
 ```bash
 # Remove skill symlinks — covers both install modes (/brainstorm and /linear-sdlc-brainstorm)
-for _name in brainstorm next implement create-tickets update-tickets checkpoint debug health upgrade; do
+for _name in kickoff brainstorm next implement create-tickets update-tickets checkpoint debug health upgrade; do
   rm -rf ~/.claude/skills/"$_name" ~/.claude/skills/"linear-sdlc-$_name"
 done
 rm -f  ~/.local/bin/lsdlc-*
@@ -211,7 +211,8 @@ Each skill hands off to the next. `/brainstorm` writes a spec that `/create-tick
 
 | Skill | Your specialist | What they do |
 |---|---|---|
-| `/brainstorm` | **Product Manager** | Start here for anything bigger than a single ticket. Searches Linear for duplicates first, runs a structured discussion, and for multi-subsystem features automatically switches into **deep-design mode** — codebase grounding, 2-3 approach trade-off table, section-by-section design walkthrough with per-section approval. Writes `specs/<slug>.md` with acceptance criteria, open questions, and scope boundaries. |
+| `/kickoff` | **Founding PM** | Day-zero project charter. Run once at the start of a brand-new project — walks you through vision, target users (1–3 personas authored inline), success metrics, constraints, MVP, non-goals, tech-stack sketch, risks, open questions. Writes `docs/CHARTER.md` and `docs/personas/*.md`. Every later skill reads the charter for grounding. Hands off to `/brainstorm` for the first feature. |
+| `/brainstorm` | **Product Manager** | Start here for anything bigger than a single ticket. Reads `docs/CHARTER.md` (if present) for grounding, then searches Linear for duplicates, runs a structured discussion, and for multi-subsystem features automatically switches into **deep-design mode** — codebase grounding, 2-3 approach trade-off table, section-by-section design walkthrough with per-section approval, structural decisions captured as ADRs in `docs/adr/`. Writes `specs/<slug>.md` with acceptance criteria, open questions, and scope boundaries. |
 | `/create-tickets` | **Project Manager** | Reads a spec and breaks it into a parent Linear issue plus blocking sub-issues. Asks you to confirm the decomposition before anything is created. Runs the whole thing in a single shell session so parent/child references resolve — no orphan tickets. Uses `lsdlc-linear create-issue` + `add-relation` directly, so it works without the Linear MCP. |
 | `/update-tickets` | **Ticket Archivist** | Refreshes existing Linear issue descriptions to match the structured issue-description template. Accepts a single issue ID, a parent ID (walks its children), or a spec path (finds every issue linking that spec). Detects already-on-template issues and skips them so re-runs are safe, reshapes the content against the template (preferring a linked spec, falling back to the existing description), and shows a per-issue diff for confirmation before calling `lsdlc-linear update-issue`. |
 | `/next` | **Scrum Lead** | Three-second triage of your backlog. Queries Linear for assigned + unblocked tickets, filters out ones that already have a local branch, ranks by priority → cycle deadline → creation date, and presents the top 3 with a recommendation. Tells you when there's already something in flight before suggesting anything new. |
@@ -483,6 +484,7 @@ Each skill is a single `SKILL.md` file with YAML frontmatter declaring which Cla
 
 | Skill | Model | Effort | Why |
 |---|---|---|---|
+| `/kickoff` | Opus | Medium | Day-zero charter is read by every later skill — synthesis-heavy, getting it wrong ripples for the life of the project |
 | `/brainstorm` | Opus | Medium | Cross-domain synthesis for feature planning; medium is plenty for interactive Q&A |
 | `/create-tickets` | Sonnet | Medium | Structured judgment over spec decomposition |
 | `/update-tickets` | Sonnet | Medium | Reshaping existing issue descriptions against the template — same flavor of structured judgment as create-tickets |

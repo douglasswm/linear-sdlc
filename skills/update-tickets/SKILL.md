@@ -122,32 +122,68 @@ shapes.
 ## Step 2: Load the Template Once
 
 Read `$LINEAR_SDLC_ROOT/templates/issue-template.md` **once** at the start
-of Step 2. It defines two shapes — parent and sub-issue — plus the
-rationale for each section. Every refresh in Step 4 must fill this
+of Step 2. It defines two **base** shapes — parent and sub-issue — plus
+the rationale for each section. Every refresh in Step 4 must fill this
 template shape exactly. This is the same file `/create-tickets` reads at
 its Step 4a, keeping both skills in lockstep.
+
+**Overlays.** The base template can be extended by type-specific
+overlays in `templates/issue-types/<type>.md`. Step 3 classifies each
+target issue by its labels; Step 4 loads any matching overlay before
+drafting. Read overlays **lazily** — only the ones the targeted issues
+actually need:
+
+```bash
+# Pseudo: after Step 3 classifies the targets, read the overlays in use
+for type in epic story bug spike; do
+  if printf '%s\n' "${TARGET_TYPES[@]}" | grep -qx "$type"; then
+    cat "$LINEAR_SDLC_ROOT/templates/issue-types/${type}.md"
+  fi
+done
+```
 
 ## Step 3: Detect Staleness and Pick Source Material
 
 For each target issue, fetch its full detail (if you don't already have
 it from Step 1) and run two checks:
 
-### 3a. Stale test
+### 3a. Classify by type
 
-Decide whether the issue is already on-template:
+Read each target's labels. The first label that matches one of `epic`,
+`story`, `bug`, `spike`, `chore` is the ticket's **type**. If none match,
+the type is `(none)` and the base shape applies. Store the type for
+Step 4. Collect the unique set of types across all targets — that's the
+list of overlays Step 4 will read.
 
-- **Parent shape** (issue's `parent` field is null): expected headings
-  `## Problem`, `## Goal`, `## Scope`.
-- **Sub-issue shape** (`parent` is set): expected headings `## Context`,
-  `## Acceptance criteria`, and the acceptance criteria block must contain
-  at least one `- [ ]` or `- [x]` line.
+A few rules:
 
-If every expected heading is present **and** (for sub-issues) the
-acceptance criteria block is non-empty, mark the issue `skipped
+- A **parent** issue (`parent` field null) with the `epic` label gets the
+  parent base shape + `epic.md` overlay.
+- A **parent** issue without `epic` label uses the base parent shape
+  unchanged. Do not auto-promote — the user may have a thin parent on
+  purpose.
+- A **sub-issue** with `story`, `bug`, or `spike` label gets the
+  sub-issue base shape + the matching overlay.
+- A **sub-issue** with `chore` label or no type label uses the base
+  sub-issue shape unchanged.
+
+### 3b. Stale test
+
+Decide whether the issue is already on-template **for its type**:
+
+- **Parent shape** (no `epic`): expected headings `## Problem`, `## Goal`, `## Scope`.
+- **Epic shape** (parent + `epic` label): the parent headings above **plus** `## Outcome`, `## Success metrics`, `## Milestones`.
+- **Sub-issue shape** (no type label or `chore`): expected headings `## Context`, `## Acceptance criteria`, **and** the acceptance criteria block must contain at least one `- [ ]` or `- [x]` line; **and** `## Test plan` and `## Definition of done` must be present.
+- **Story shape** (`story` label): the sub-issue headings above **plus** `## User story` and Gherkin-style criteria (each `- [ ]` line includes `Given`/`When`/`Then` or starts with `Given`).
+- **Bug shape** (`bug` label): the sub-issue headings above **plus** `## Steps to reproduce`, `## Expected behavior`, `## Actual behavior`, `## Severity`.
+- **Spike shape** (`spike` label): the sub-issue headings above **plus** `## Question`, `## Time-box`, `## Deliverable`.
+
+If every expected heading is present **and** (for non-spike sub-issues)
+the acceptance criteria block is non-empty, mark the issue `skipped
 (already on-template)` and do not draft a refresh. This makes re-runs
 safe.
 
-### 3b. Source material resolution
+### 3c. Source material resolution
 
 For issues that need a refresh, pick the content source in this order:
 
@@ -164,8 +200,8 @@ For issues that need a refresh, pick the content source in this order:
 ## Step 4: Draft the Refreshed Description
 
 For each non-skipped target, draft a full description that follows
-`templates/issue-template.md`. Copy the rules `/create-tickets` enforces
-at its Step 4a:
+`templates/issue-template.md` **plus the type overlay determined in
+Step 3a**. Copy the rules `/create-tickets` enforces at its Step 4a:
 
 - **Never drop a heading.** If a section genuinely has nothing to say,
   write `none` — do not omit the heading itself.
@@ -177,6 +213,18 @@ at its Step 4a:
   Only add new criteria if the spec dictates them. Never silently drop
   or reword an existing criterion — if one is wrong, surface it in Step
   5 and let the user decide.
+- **Type-specific preservation.** When refreshing an issue that already
+  has overlay sections (e.g. an existing bug with Steps to reproduce),
+  carry those sections forward verbatim. Never flatten an overlaid
+  ticket back to base shape. If the user wants to *change* a ticket's
+  type, that's a separate operation — surface it in Step 5 and confirm.
+- **Apply the matching overlay merge rules from `/create-tickets` Step 4a.**
+  story → Gherkin AC; bug → Steps to reproduce / Expected / Actual /
+  Environment / Severity; spike → Question / Time-box / Deliverable;
+  epic → Outcome / KPIs / Milestones.
+- **Always include `## Definition of done`** when refreshing a sub-issue,
+  even if the original lacked it. This is the baseline DoD from the
+  base template, not an overlay section.
 - **Titles are left alone by default.** Only draft a title change if the
   current title has a clear bug (typo, wrong prefix). Title drift is not
   something this skill fixes.
@@ -301,6 +349,15 @@ lsdlc-linear update-issue VER-42 --description-file "$TMPD/ver-42.md"
 If the user approved a title change for any issue, add `--title "..."` to
 that issue's `update-issue` call. Both flags can be passed in the same
 invocation.
+
+**Error capture on partial failure.** If any `lsdlc-linear update-issue`
+call returns non-zero, capture the failure (record which IDs succeeded
+and which did not) and surface it as DONE_WITH_CONCERNS rather than
+silently continuing:
+
+```bash
+_lsdlc_capture_error step-6 "linear-update-failed" "lsdlc-linear update-issue returned non-zero for <ID>. Refreshed: <list>. Failed: <list>. Re-run with the failing IDs after fixing the API issue."
+```
 
 ## Step 7: Summary
 

@@ -96,12 +96,29 @@ Analyze the spec and propose a ticket structure:
 1. **Parent issue** — The feature/epic level ticket
 2. **Sub-issues** — Individual implementable tickets
 3. **Dependencies** — Which sub-issues must be completed before others
+4. **Type** — One of `epic` (parent default), `story`, `bug`, `spike`, `chore`, or none (sub-issue default)
 
 Guidelines for breakdown:
 - Each sub-issue should be completable in 1-3 sessions
 - Each sub-issue should have clear acceptance criteria. Draft at least 2–3 testable criteria per sub-issue during the breakdown — these become the `Acceptance criteria` checklist in the Linear description and the contract `/implement` checks against.
 - Identify the critical path (what must be done first)
 - Group related work (don't split a natural unit across tickets)
+
+### Picking a ticket type
+
+Each ticket gets a type label that drives which overlay
+`templates/issue-types/<type>.md` gets applied in Step 4. Pick the type
+based on what the ticket actually is, not what feels prestigious:
+
+- **epic** — parent ticket spanning ≥2 sub-issues, has its own outcome and KPIs. Default for parents when the spec is greenfield or strategically scoped. Skip for trivial parents that are just a TOC.
+- **story** — sub-issue that delivers a user-visible slice. Has a persona, a narrative, and Gherkin-shaped acceptance criteria. Use when the spec includes user stories.
+- **bug** — sub-issue that fixes broken behavior. Use when the spec is a defect report rather than a feature.
+- **spike** — sub-issue that answers a question rather than ships a feature. Time-boxed; deliverable is a decision (often an ADR).
+- **chore** — sub-issue for tech debt, refactors, infra. No overlay yet — uses the base sub-issue shape.
+- **(none)** — backend / glue work that doesn't fit any of the above. Uses the base sub-issue shape.
+
+Carry the chosen type through to Step 3 and Step 4 so the user sees it
+during confirmation and the right overlay loads at write time.
 
 ## Step 3: Confirm with User
 
@@ -114,10 +131,12 @@ Use the per-ticket block format below (not a markdown table — tables can't fit
 
 ### Parent Issue
 **Rate Limiting System** — Implement rate limiting across API endpoints
+- Type: epic
 - Priority: High
-- Labels: backend, security
+- Labels: epic, backend, security
 
 ### Sub-Issue 1: Rate limiter middleware
+- Type: (none — base sub-issue shape)
 - Priority: High
 - Blocked by: none
 - Acceptance criteria:
@@ -127,7 +146,9 @@ Use the per-ticket block format below (not a markdown table — tables can't fit
   - [ ] Unit tests cover the sliding-window math and the over-limit path
 
 ### Sub-Issue 2: Apply rate limiting to auth endpoints
+- Type: story
 - Priority: High
+- Labels: story, backend, security
 - Blocked by: Sub-Issue 1
 - Acceptance criteria:
   - [ ] Login, register, and password reset return 429 after the configured threshold
@@ -166,19 +187,44 @@ Use AskUserQuestion:
 
 ## Step 4: Create in Linear
 
-### 4a. Read the issue description template
+### 4a. Read the issue description templates (base + overlays)
 
 Every Linear issue this skill creates uses the shape defined in
 `$LINEAR_SDLC_ROOT/templates/issue-template.md`. Read that file **once** at the
-start of Step 4 — it contains the parent and sub-issue templates plus the
-rationale for each section. Draft every ticket's description by filling in the
-placeholders against the spec and the breakdown approved in Step 3.
+start of Step 4 — it contains the base parent and sub-issue templates plus the
+rationale for each section.
+
+For tickets that carry a **type label** from Step 2, also read the matching
+overlay from `$LINEAR_SDLC_ROOT/templates/issue-types/<type>.md`:
+
+```bash
+# Example: read base + epic + story overlays for a breakdown that has 1 epic parent and 2 stories
+cat "$LINEAR_SDLC_ROOT/templates/issue-template.md"
+[ -f "$LINEAR_SDLC_ROOT/templates/issue-types/epic.md" ]  && cat "$LINEAR_SDLC_ROOT/templates/issue-types/epic.md"
+[ -f "$LINEAR_SDLC_ROOT/templates/issue-types/story.md" ] && cat "$LINEAR_SDLC_ROOT/templates/issue-types/story.md"
+```
+
+Only read the overlays the breakdown actually uses — don't read all four
+unconditionally. If a ticket has no type label, use the base shape unchanged.
+
+**Overlay merge rules:**
+
+- `epic` — apply on top of the **parent** base shape. Append the overlay sections (Outcome, Success metrics, Personas served, Milestones, Risks) **after** `## Goal` and **before** `## Scope`.
+- `story` — apply on top of the **sub-issue** base shape. **Replace** the freeform `Acceptance criteria` checklist with the Gherkin scenarios from the overlay. **Substitute** the User story header at the top (before `## Context`). **Append** Designs / Telemetry / Copy after `## Implementation notes` and before `## Test plan`.
+- `bug` — apply on top of the **sub-issue** base shape. **Replace** the `Requirements` section with the bug-specific fields (Steps to reproduce, Expected, Actual, Environment, Severity, Suspected root cause). Acceptance criteria stays.
+- `spike` — apply on top of the **sub-issue** base shape. **Replace** Requirements + Acceptance criteria with the spike fields (Question, Time-box, Deliverable, Decision criteria, plus the spike-specific AC checklist).
+- `chore` / no type — base shape unchanged.
 
 **Do not skip sections or inline one-line descriptions.** A sub-issue without a
 concrete `Acceptance criteria` checklist breaks `/implement`, which reads that
 checklist back when planning and verifying. If a section genuinely has nothing
 to say (e.g. an independent ticket has no `Blocked by`), write `none` rather
-than dropping the heading.
+than dropping the heading. **Always include `## Definition of done`** from the
+base sub-issue template — overlays do not repeat it.
+
+**Pass the type label to Linear.** When calling `lsdlc-linear create-issue`,
+include the type in `--labels` (e.g. `--labels "story,backend"`). This lets
+`/update-tickets` re-classify the ticket on later refreshes.
 
 ### 4b. Run the creation in a single bash tool call
 
@@ -302,6 +348,15 @@ echo "Created child 2: $CHILD2_ID"
 lsdlc-linear add-relation "$CHILD2_ID" blockedBy "$CHILD1_ID"
 ```
 
+**Error capture on partial failure.** If any `lsdlc-linear create-issue`
+or `add-relation` call returns non-zero in the middle of the run, stop
+the bash session, capture the failure, and report BLOCKED with a list
+of which tickets did and did not get created:
+
+```bash
+_lsdlc_capture_error step-4b "linear-create-failed" "lsdlc-linear create-issue returned non-zero mid-run. Created so far: <list of identifiers>. Re-run with the spec after fixing the API issue; existing tickets will not be re-created if their identifiers are passed via --resume (TODO)."
+```
+
 After running, Step 5's summary table can pull every identifier from the `echo` lines above (still in the same bash output).
 
 ## Step 5: Summary
@@ -338,5 +393,5 @@ SUMMARY: Created 4 Linear tickets (VER-60 through VER-64) from specs/rate-limiti
 
 1. **Always confirm before creating.** Never create tickets without user approval of the breakdown.
 2. **Set dependencies accurately.** Wrong dependencies cause confusion when `/next` recommends tickets.
-3. **Every description follows `templates/issue-template.md`.** Parent issues: Problem / Goal / Scope / Out of scope / Spec. Sub-issues: Context / Requirements / Acceptance criteria / Implementation notes / Dependencies / Spec. A sub-issue without a concrete `Acceptance criteria` checklist is broken — `/implement` reads that checklist back when planning and verifying, and `/next` uses it to judge readiness.
+3. **Every description follows `templates/issue-template.md` (plus type overlay if labeled).** Parent issues: Problem / Goal / Scope / Out of scope / Spec, plus epic-overlay sections if `epic`. Sub-issues: Context / Requirements / Acceptance criteria / Implementation notes / Test plan / Dependencies / Spec / Definition of done, plus type-overlay sections per Step 4a. A sub-issue without a concrete `Acceptance criteria` checklist is broken — `/implement` reads that checklist back when planning and verifying, and `/next` uses it to judge readiness.
 4. **Link back to the spec.** Every ticket's `Spec` section references the spec file path.
