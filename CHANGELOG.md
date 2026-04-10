@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.4.2 — 2026-04-10 — Autoupdate dialog fires automatically instead of waiting for the user to type `/upgrade`
+
+**Fix.** When `bin/lsdlc-update-check` detected a new release, the shared preamble printed an `UPDATE_AVAILABLE` line plus a `NOTE_TO_CLAUDE:` directive that read *"Pause the current task, read and follow the /upgrade skill, then resume the current skill."* In practice, that wording was ambiguous enough that Claude often interpreted it as "tell the user a new version is available and suggest they run `/upgrade`" — kicking the dialog back to the user instead of driving it directly. The whole point of the directive was that the four-option `AskUserQuestion` flow inside `skills/upgrade/SKILL.md` is supposed to be Claude-initiated; the user should only ever see the actual prompt, not a meta-suggestion to type a slash command.
+
+`references/preamble.sh:147` now emits an unambiguous directive: *"Do NOT just tell the user to run /upgrade — execute the /upgrade skill yourself right now (read $LINEAR_SDLC_ROOT/skills/upgrade/SKILL.md and follow it step-by-step). The skill will present a 4-option AskUserQuestion dialog (Yes / Always / Not now / Never) so the user picks the action; your job is to drive the flow, not to defer it. After the upgrade dialog resolves, resume the current skill."* The behavior of `/upgrade` itself is unchanged — `auto_upgrade: true` still short-circuits the dialog, snoozes still escalate 24h → 48h → 7d, the cache still expires `UPGRADE_AVAILABLE` after 12h — but for users who have not opted into auto-upgrade, the very next skill invocation after a release lands will now show them the four-option prompt directly, the way it was always designed to.
+
+`docs/hacking.md` autoupdate section updated to match the new wording so future contributors don't accidentally soften the directive again.
+
+No code change to `bin/lsdlc-update-check`, no new config keys, no schema change — just a clearer instruction to Claude in the bash output the preamble already prints.
+
 ## v2.4.1 — 2026-04-09 — `lsdlc-linear search-issues` switches to Linear's non-deprecated `searchIssues` root field
 
 **Fix.** Every call to `lsdlc-linear search-issues` was failing with `graphql error: deprecated`. Linear retired the `query` argument on the `issueSearch` root field — the field still appears non-deprecated in schema introspection, but any call that passes `query:` now returns a deprecation error at runtime. This broke `/brainstorm` prior-art lookups (`skills/brainstorm/SKILL.md:103`) and the spec-path branch of `/update-tickets` (`skills/update-tickets/SKILL.md:102`), and made `lsdlc-linear search-issues` unusable as a standalone helper.

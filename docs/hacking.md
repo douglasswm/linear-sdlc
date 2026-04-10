@@ -158,7 +158,7 @@ through a hard `lsdlc-wiki secret-scan` gate. Nothing auto-commits.
 
 ## Autoupdate
 
-The shared preamble runs `bin/lsdlc-update-check` on every skill invocation. It's silent on the happy path; when a newer release is available it prints `UPDATE_AVAILABLE <old> <new>` plus a one-line `NOTE_TO_CLAUDE:` directive telling Claude to dispatch to `/upgrade` before resuming the current skill. The `/upgrade` skill (`skills/upgrade/SKILL.md`) then runs the Yes / Always / Not now / Never ask again dialog and, on Yes, runs `git fetch origin && git reset --hard origin/main && ./setup --skip-api-key --skip-mcp-prompt -q`.
+The shared preamble runs `bin/lsdlc-update-check` on every skill invocation. It's silent on the happy path; when a newer release is available it prints `UPDATE_AVAILABLE <old> <new>` plus a `NOTE_TO_CLAUDE:` directive instructing Claude to **execute the `/upgrade` skill itself immediately** (not to merely tell the user it's available). The `/upgrade` skill (`skills/upgrade/SKILL.md`) then runs the Yes / Always / Not now / Never ask again dialog via `AskUserQuestion`, and on Yes runs `git fetch origin && git reset --hard origin/main && ./setup --skip-api-key --skip-mcp-prompt -q`. The whole point of the directive's wording is that Claude drives the dialog — the user only sees the four-option prompt, not a "please run /upgrade" suggestion.
 
 **Design choices** (see `bin/lsdlc-update-check` header for the full rationale):
 - **Split-TTL cache:** `UP_TO_DATE` expires after 60 min (detect new releases quickly), `UPGRADE_AVAILABLE` after 12 h (nag persistently without spamming the network).

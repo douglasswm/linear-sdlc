@@ -144,7 +144,7 @@ if command -v lsdlc-update-check >/dev/null 2>&1; then
     printf '%s\n' "$_LSDLC_UPD"
     case "$_LSDLC_UPD" in
       UPDATE_AVAILABLE*)
-        printf 'NOTE_TO_CLAUDE: A linear-sdlc update is available. Pause the current task, read and follow the /upgrade skill (skills/upgrade/SKILL.md), then resume the current skill.\n'
+        printf 'NOTE_TO_CLAUDE: A linear-sdlc update is available. Do NOT just tell the user to run /upgrade — execute the /upgrade skill yourself right now (read $LINEAR_SDLC_ROOT/skills/upgrade/SKILL.md and follow it step-by-step). The skill will present a 4-option AskUserQuestion dialog (Yes / Always / Not now / Never) so the user picks the action; your job is to drive the flow, not to defer it. After the upgrade dialog resolves, resume the current skill.\n'
         ;;
     esac
   fi
